@@ -233,23 +233,35 @@ pub fn display_name_for(pid: u32, key: &str) -> Option<String> {
 const RECOVERY_WINDOW: Duration = Duration::from_secs(15);
 
 /// Re-identify a stream whose `media.name` can't be trusted (generic, or
-/// wearing another live stream's title): the tab that just started playing is
-/// almost always the most-recently-active media session on that PID. Replaces
-/// the ART_MEMORY 30s-departed-identity heuristic — this works after a mute of
-/// any length, because unmuting re-activates the session *now*. Never returns
-/// an identity another live stream already wears (`worn`), and refuses to
-/// guess when no session is fresh enough.
+/// wearing another live stream's title). The freshest unworn session on the
+/// PID is adopted when either:
+///  - it signaled within `RECOVERY_WINDOW` (the tab that just started playing
+///    re-activated its session moments ago), or
+///  - it is the PID's *current active session* (nothing on the PID is newer).
+///    Unmuting a tab that was already the active session emits NO metadata
+///    change — its record looks stale even though the browser is actively
+///    reporting that content as playing (observed 2026-07-04: Twitch
+///    mute/unmute never recovered while Kick always did).
+/// Never returns an identity another live stream already wears (`worn`);
+/// a stale non-active candidate is refused rather than guessed.
 pub fn recover_recent_identity(pid: u32, worn: &HashSet<String>, now: SystemTime) -> Option<String> {
     let sessions = SESSIONS.lock().unwrap();
+    let newest_on_pid = sessions
+        .iter()
+        .filter(|((p, _), _)| *p == pid)
+        .map(|(_, rec)| rec.last_active)
+        .max()?;
     sessions
         .iter()
         .filter(|((p, key), _)| *p == pid && !worn.contains(key))
-        .filter(|(_, rec)| {
-            now.duration_since(rec.last_active)
-                .map(|age| age < RECOVERY_WINDOW)
-                .unwrap_or(true)
-        })
         .max_by_key(|(_, rec)| rec.last_active)
+        .filter(|(_, rec)| {
+            let fresh = now
+                .duration_since(rec.last_active)
+                .map(|age| age < RECOVERY_WINDOW)
+                .unwrap_or(true);
+            fresh || rec.last_active >= newest_on_pid
+        })
         .map(|((_, key), _)| key.clone())
 }
 
@@ -708,8 +720,39 @@ mod tests {
             recover_recent_identity(pid, &HashSet::new(), now).as_deref(),
             Some("ttv:fresh")
         );
-        // A worn identity is never re-adopted; the stale one is out of window.
+        // A worn identity is never re-adopted; the stale one is neither fresh
+        // nor the pid's newest session, so it's refused.
         let worn: HashSet<String> = [String::from("ttv:fresh")].into();
+        assert_eq!(recover_recent_identity(pid, &worn, now), None);
+        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn recovers_stale_session_when_it_is_the_current_active_one() {
+        // Unmuting a tab that was ALREADY the active session emits no metadata
+        // change — the record is stale, but it's still the pid's newest, i.e.
+        // what the browser reports as playing. Must be adopted.
+        let pid = 910_007;
+        SESSIONS.lock().unwrap().insert(
+            (pid, "ttv:nmplol".into()),
+            SessionRecord {
+                identity: MediaIdentity::Twitch {
+                    login: "nmplol".into(),
+                },
+                title: "Some Subtitle".into(),
+                artist: Some("Nmplol".into()),
+                art: None,
+                last_active: SystemTime::now() - Duration::from_secs(1200),
+                dormant_since: None,
+            },
+        );
+        let now = SystemTime::now();
+        assert_eq!(
+            recover_recent_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("ttv:nmplol")
+        );
+        // But once a live stream wears it, it is never handed out again.
+        let worn: HashSet<String> = [String::from("ttv:nmplol")].into();
         assert_eq!(recover_recent_identity(pid, &worn, now), None);
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }

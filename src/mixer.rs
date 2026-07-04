@@ -192,8 +192,11 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         .collect();
 
     // Identities a re-identification must never adopt: everything a live
-    // stream already wears or names.
-    let recovery_worn: HashSet<String> = prev_identities
+    // stream already wears or names. Mutable — each adoption during the loop
+    // below consumes its identity, so two generic streams in one refresh can
+    // never recover the same one (observed 2026-07-04: two returning Kick
+    // streams both recovered kick:asmongold247 in a single pass).
+    let mut recovery_worn: HashSet<String> = prev_identities
         .iter()
         .cloned()
         .chain(identity_counts.keys().cloned())
@@ -227,6 +230,12 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
                 now,
             ),
         };
+
+        // Consume this channel's identity so no later stream in the same
+        // refresh can recover or adopt it too.
+        if let Some(k) = &channel.identity {
+            recovery_worn.insert(k.clone());
+        }
 
         // Live data always follows the stream.
         channel.mute = app.mute;
