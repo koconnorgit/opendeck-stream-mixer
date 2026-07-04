@@ -94,14 +94,22 @@ static DEPARTED_IDENTITIES: LazyLock<std::sync::Mutex<HashMap<(u32, String), Sys
 /// unrelated streams.
 const DEPARTED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Adopt the unique recently-departed, unworn identity on this PID, or refuse.
+/// A departure this recent is "what just happened" — the mute the returning
+/// stream belongs to. Old departures (tab navigations minutes ago) linger in
+/// the table for the TTL and must not block adopting the obvious fresh one.
+const DEPARTED_FRESH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Adopt a recently-departed, unworn identity on this PID: the uniquely FRESH
+/// departure (the mute that just happened) wins even when stale departures
+/// pollute the table; otherwise a unique candidate overall. Two fresh
+/// departures (two tabs muted at once) are ambiguous — refuse, never guess.
 fn recover_departed_identity(
     pid: u32,
     worn: &HashSet<String>,
     now: SystemTime,
 ) -> Option<String> {
     let departed = DEPARTED_IDENTITIES.lock().unwrap();
-    let mut candidates = departed
+    let candidates: Vec<(&String, SystemTime)> = departed
         .iter()
         .filter(|((p, key), at)| {
             *p == pid
@@ -111,12 +119,23 @@ fn recover_departed_identity(
                     .map(|age| age < DEPARTED_TTL)
                     .unwrap_or(true)
         })
-        .map(|((_, key), _)| key.clone());
-    let candidate = candidates.next()?;
-    if candidates.next().is_some() {
-        return None; // Ambiguous — never guess which returning stream this is.
+        .map(|((_, key), at)| (key, *at))
+        .collect();
+
+    let fresh: Vec<&(&String, SystemTime)> = candidates
+        .iter()
+        .filter(|(_, at)| {
+            now.duration_since(*at)
+                .map(|age| age < DEPARTED_FRESH)
+                .unwrap_or(true)
+        })
+        .collect();
+
+    match (fresh.len(), candidates.len()) {
+        (1, _) => Some(fresh[0].0.clone()),
+        (0, 1) => Some(candidates[0].0.clone()),
+        _ => None,
     }
-    Some(candidate)
 }
 
 /// How long a cross-identity name shift must persist, uncontested, before it
@@ -241,6 +260,27 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         .chain(identity_counts.keys().cloned())
         .collect();
 
+    // Record departures BEFORE reconciling: Firefox replaces a muted stream's
+    // sink-input with a silent "AudioStream" one in the SAME event batch, so
+    // the replacement is processed in the same refresh its predecessor died —
+    // tier-3 recovery must already see that departure.
+    {
+        let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+        departed.retain(|_, at| {
+            now.duration_since(*at)
+                .map(|age| age < DEPARTED_TTL)
+                .unwrap_or(true)
+        });
+        for ch in previous_by_uid.values() {
+            if active_uids.contains(&ch.uid) {
+                continue;
+            }
+            if let (Some(pid), Some(key)) = (ch.pid, ch.identity.clone()) {
+                departed.insert((pid, key), now);
+            }
+        }
+    }
+
     let mut new_channels: HashMap<u8, MixerChannel> = HashMap::new();
     let mut col_key: u8 = 0;
 
@@ -296,22 +336,10 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         col_key += 1;
     }
 
-    // Maintain the departed-identity memory: channels left in previous_by_uid
-    // were not matched by any live stream this refresh — their identities
-    // become adoptable; identities now worn by a live channel stop being
-    // "departed" (the stream came back).
+    // An identity a live channel wears is no longer "departed" — the stream
+    // came back (or its identity was adopted by its replacement).
     {
         let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
-        departed.retain(|_, at| {
-            now.duration_since(*at)
-                .map(|age| age < DEPARTED_TTL)
-                .unwrap_or(true)
-        });
-        for ch in previous_by_uid.values() {
-            if let (Some(pid), Some(key)) = (ch.pid, ch.identity.clone()) {
-                departed.insert((pid, key), now);
-            }
-        }
         for ch in new_channels.values() {
             if let (Some(pid), Some(key)) = (ch.pid, ch.identity.clone()) {
                 departed.remove(&(pid, key));
@@ -409,6 +437,11 @@ fn reconcile_existing(
             );
             prev.identity = Some(key);
             prev.app_name = name;
+        } else {
+            println!(
+                "No identity for generic stream uid={} (worn: {:?})",
+                prev.uid, recovery_worn
+            );
         }
     } else if raw != &prev.app_name
         && !crate::mpris::is_generic_name(raw)
@@ -472,7 +505,13 @@ fn build_new(
             // No trustworthy identity: keep the reported name (the label may
             // be transiently wrong; the multi-sink label guard and later
             // media.name updates keep it presentable).
-            None => (None, raw.clone()),
+            None => {
+                println!(
+                    "No identity for new stream uid={} (reported {:?}, worn: {:?})",
+                    app.uid, raw, recovery_worn
+                );
+                (None, raw.clone())
+            }
         }
     } else {
         (raw_identity, raw.clone())
@@ -759,13 +798,23 @@ mod tests {
         // Worn → refused.
         let worn: HashSet<String> = [String::from("kick:b")].into();
         assert_eq!(recover_departed_identity(pid, &worn, now), None);
-        // Two departed identities → ambiguous, refused.
+        // Two FRESH departures (two tabs muted at once) → ambiguous, refused.
         DEPARTED_IDENTITIES
             .lock()
             .unwrap()
             .insert((pid, "ttv:c".into()), now);
         assert_eq!(recover_departed_identity(pid, &HashSet::new(), now), None);
-        // Expired entries don't count.
+        // A stale-but-valid departure (an old tab navigation) must not block
+        // adopting the uniquely fresh one — the mute that just happened.
+        {
+            let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+            departed.insert((pid, "ttv:c".into()), now - std::time::Duration::from_secs(60));
+        }
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("kick:b")
+        );
+        // Expired entries don't count at all.
         {
             let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
             departed.insert((pid, "ttv:c".into()), now - DEPARTED_TTL);
