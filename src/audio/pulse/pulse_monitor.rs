@@ -232,17 +232,38 @@ fn start_refresh_processor() {
                 }
 
                 println!("Processing debounced refresh request...");
-                match refresh_audio_applications().await {
-                    Ok(_) => {
-                        println!("Audio applications refreshed successfully");
-                        // Schedule a delayed full refresh to catch MPRIS art files
-                        // and PulseAudio metadata that arrive after initial events
-                        crate::mpris::schedule_delayed_refresh();
-                    }
-                    Err(e) => eprintln!("Failed to refresh audio applications: {:?}", e),
+                if refresh_guarded("debounced").await {
+                    println!("Audio applications refreshed successfully");
+                    // Schedule a delayed full refresh to catch MPRIS art files
+                    // and PulseAudio metadata that arrive after initial events
+                    crate::mpris::schedule_delayed_refresh();
                 }
             }
         });
+    }
+}
+
+/// Run a full refresh on its own task so a panic anywhere in the refresh
+/// pipeline is contained and logged instead of killing the caller. Refreshes
+/// run inside the debounced-refresh loop and openaction event handlers; an
+/// uncontained panic permanently stops all future updates (stale channels then
+/// send volume writes to dead sink-input uids) or all deck input. Returns
+/// whether the refresh succeeded.
+pub async fn refresh_guarded(context: &'static str) -> bool {
+    let result = tokio::spawn(async {
+        refresh_audio_applications().await.map_err(|e| e.to_string())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            eprintln!("Failed to refresh audio applications ({context}): {e}");
+            false
+        }
+        Err(e) => {
+            eprintln!("Refresh panicked ({context}); loop kept alive: {e}");
+            false
+        }
     }
 }
 

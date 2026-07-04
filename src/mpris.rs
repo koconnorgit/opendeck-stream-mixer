@@ -169,10 +169,14 @@ const TITLE_SUFFIXES: &[&str] = &[
 pub(crate) fn clean_stream_title(title: &str) -> String {
     let trimmed = title.trim();
     for suffix in TITLE_SUFFIXES {
-        if trimmed.len() >= suffix.len()
-            && trimmed[trimmed.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
-        {
-            return trimmed[..trimmed.len() - suffix.len()].trim().to_string();
+        let Some(idx) = trimmed.len().checked_sub(suffix.len()) else {
+            continue;
+        };
+        // A multi-byte char straddling the split point means the ASCII suffix
+        // can't be there; slicing would panic (titles carry emoji), so check
+        // the boundary.
+        if trimmed.is_char_boundary(idx) && trimmed[idx..].eq_ignore_ascii_case(suffix) {
+            return trimmed[..idx].trim().to_string();
         }
     }
     trimmed.to_string()
@@ -289,7 +293,7 @@ pub async fn enrich_generic_names(apps: &mut [AppInfo]) {
 pub fn schedule_delayed_refresh() {
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        let _ = crate::audio::pulse::pulse_monitor::refresh_audio_applications().await;
+        crate::audio::pulse::pulse_monitor::refresh_guarded("delayed").await;
     });
 }
 
@@ -314,6 +318,14 @@ mod tests {
     #[test]
     fn leaves_unrecognized_titles_untouched() {
         assert_eq!(clean_stream_title("Just A Title"), "Just A Title");
+    }
+
+    #[test]
+    fn emoji_title_with_mid_char_split_point_does_not_panic() {
+        // Regression: same unchecked byte-slice bug as kick.rs strip_suffix_ci —
+        // len - suffix.len() landing inside a multi-byte char panicked.
+        assert_eq!(clean_stream_title("🎵🎵🎵🎵"), "🎵🎵🎵🎵");
+        assert_eq!(clean_stream_title("🎵 Song - YouTube"), "🎵 Song");
     }
 
     // --- pick_art selection logic ---

@@ -4,7 +4,7 @@ use openaction::global_events::{GlobalEventHandler, DidReceiveGlobalSettingsEven
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    audio::{self, pulse::pulse_monitor::refresh_audio_applications, *},
+    audio::{self, pulse::pulse_monitor::refresh_guarded, *},
     gfx::{self},
     mixer::{self, ENCODER_TO_CHANNEL_MAP},
     utils::{self, ButtonPressControl},
@@ -116,7 +116,9 @@ impl GlobalEventHandler for GlobalHandler {
             }
 
             if ignored_changed {
-                let _ = refresh_audio_applications().await;
+                // Guarded: this runs inside the openaction event loop — a panic
+                // here would kill all deck input, not just this refresh.
+                refresh_guarded("ignored-apps change").await;
             }
         }
 
@@ -179,7 +181,9 @@ impl Action for VolumeControllerAction {
 
             // Apply show_sys_mixer setting
             utils::set_show_system_mixer(settings.show_sys_mixer);
-            let _ = refresh_audio_applications().await;
+            // Guarded: this runs inside the openaction event loop — a panic
+            // here would kill all deck input, not just this refresh.
+            refresh_guarded("show-sys-mixer change").await;
         } else {
             drop(cached);
             println!("Settings unchanged, skipping broadcast");
@@ -451,10 +455,18 @@ impl Action for VolumeControllerAction {
             return Ok(());
         };
         for uid in &members {
-            if ticks > 0 {
-                let _ = audio.increase_volume(*uid, increment, is_device);
+            let result = if ticks > 0 {
+                audio.increase_volume(*uid, increment, is_device)
             } else if ticks < 0 {
-                let _ = audio.decrease_volume(*uid, increment, is_device);
+                audio.decrease_volume(*uid, increment, is_device)
+            } else {
+                continue;
+            };
+            // A failure here usually means the channel holds a stale sink-input
+            // uid (refreshes stopped or lagged) — losing these errors made a
+            // dead refresh loop look like broken encoders.
+            if let Err(e) = result {
+                println!("Warning: Failed to adjust volume for stream {}: {}", uid, e);
             }
         }
 
@@ -485,7 +497,9 @@ impl Action for VolumeControllerAction {
             return Ok(());
         };
         for uid in &members {
-            let _ = audio.mute_volume(*uid, mute, is_device);
+            if let Err(e) = audio.mute_volume(*uid, mute, is_device) {
+                println!("Warning: Failed to set mute for stream {}: {}", uid, e);
+            }
         }
 
         Ok(())
@@ -522,7 +536,9 @@ impl Action for VolumeControllerAction {
                 return Ok(());
             };
             for uid in &members {
-                let _ = audio.mute_volume(*uid, mute, is_device);
+                if let Err(e) = audio.mute_volume(*uid, mute, is_device) {
+                    println!("Warning: Failed to set mute for stream {}: {}", uid, e);
+                }
             }
             return Ok(());
         }

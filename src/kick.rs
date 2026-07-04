@@ -48,8 +48,11 @@ static AVATARS: LazyLock<Mutex<HashMap<String, AvatarState>>> =
 
 /// Case-insensitive suffix strip. Returns the prefix with `suffix` removed.
 fn strip_suffix_ci<'a>(s: &'a str, suffix: &str) -> Option<&'a str> {
-    if s.len() >= suffix.len() && s[s.len() - suffix.len()..].eq_ignore_ascii_case(suffix) {
-        Some(&s[..s.len() - suffix.len()])
+    let idx = s.len().checked_sub(suffix.len())?;
+    // A multi-byte char straddling the split point means the ASCII suffix can't
+    // be there; slicing would panic (titles carry emoji), so check the boundary.
+    if s.is_char_boundary(idx) && s[idx..].eq_ignore_ascii_case(suffix) {
+        Some(&s[..idx])
     } else {
         None
     }
@@ -139,7 +142,7 @@ fn spawn_fetch(slug: String) {
             cache.insert(slug, state);
         }
 
-        let _ = crate::audio::pulse::pulse_monitor::refresh_audio_applications().await;
+        crate::audio::pulse::pulse_monitor::refresh_guarded("kick avatar").await;
     });
 }
 
@@ -239,6 +242,16 @@ mod tests {
             crate::kick::display_name("Some Song - YouTube"),
             "Some Song - YouTube"
         );
+    }
+
+    #[test]
+    fn emoji_title_with_mid_char_split_point_does_not_panic() {
+        // Regression: "🎵🎵🎵🎵" is 16 bytes and len - " - Kick".len() = 9 falls
+        // inside the third emoji; the old byte-slice panicked on exactly this
+        // (live incident 2026-07-04, killed the refresh loop).
+        assert_eq!(kick_slug("🎵🎵🎵🎵"), None);
+        assert_eq!(display_name("🎵🎵🎵🎵"), "🎵🎵🎵🎵");
+        assert_eq!(kick_slug("Lofi Beats 🎵🎵 to relax to 🎵"), None);
     }
 
     #[test]
