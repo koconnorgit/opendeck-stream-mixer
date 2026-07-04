@@ -43,6 +43,14 @@ pub struct MixerChannel {
     /// whether it produced art or a deliberate "no art". Stops a later refresh
     /// from grabbing an unrelated file. Reset only on a name-shift.
     pub art_resolved: bool,
+    /// A cross-identity name shift waiting out its confirmation window (the
+    /// proposed new name + when it was first seen). Firefox re-tags EXISTING
+    /// sink-inputs with the active session's title when another tab starts
+    /// playing (observed 2026-07-04: the Twitch sink-input renamed to a Kick
+    /// tab's title before the Kick stream's own sink-input existed), and only
+    /// time separates that lie from a genuine same-tab navigation: the lie's
+    /// real owner shows up seconds later and collides. See `confirm_deferred_shift`.
+    pub pending_name_shift: Option<(String, SystemTime)>,
     pub is_device: bool,
     pub is_multi_sink_app: bool,
 }
@@ -203,6 +211,44 @@ fn apply_art(
 fn identity_of_path(path: Option<&PathBuf>) -> Option<&str> {
     path.and_then(|p| p.to_str())
         .and_then(|s| s.strip_prefix("identity://"))
+}
+
+/// How long a cross-identity name shift must persist, uncontested, before it
+/// is believed. Long enough for the title's real owner (the other tab's own
+/// sink-input) to appear and collide; short enough that a genuine same-tab
+/// navigation only lags its relabel by a couple of refreshes.
+const SHIFT_CONFIRM: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Decide a deferred cross-identity shift. Returns true when the shift is
+/// confirmed (uncontested for `SHIFT_CONFIRM`). `identity_taken` means another
+/// live stream currently maps to the proposed name's identity — the shift is
+/// the re-tag lie, so the pending state is dropped entirely.
+fn confirm_deferred_shift(
+    pending: &mut Option<(String, SystemTime)>,
+    new_name: &str,
+    now: SystemTime,
+    identity_taken: bool,
+) -> bool {
+    if identity_taken {
+        *pending = None;
+        return false;
+    }
+    match pending {
+        Some((name, since)) if name == new_name => {
+            let confirmed = now
+                .duration_since(*since)
+                .map(|d| d >= SHIFT_CONFIRM)
+                .unwrap_or(false);
+            if confirmed {
+                *pending = None;
+            }
+            confirmed
+        }
+        _ => {
+            *pending = Some((new_name.to_string(), now));
+            false
+        }
+    }
 }
 
 /// Outcome of the identity-first art attempt (phase 2 of
@@ -389,6 +435,7 @@ pub async fn create_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
             // have no reliable timing anchor for them.
             first_seen: None,
             art_resolved: false,
+            pending_name_shift: None,
             locked: false,
             is_device: app.is_device,
             is_multi_sink_app: app.is_multi_sink_app,
@@ -483,6 +530,20 @@ pub async fn update_mixer_channels(
     let live_names: HashSet<String> =
         active_apps.iter().map(|a| a.app_name.to_lowercase()).collect();
 
+    // How many live streams map to each media identity this refresh. Like the
+    // cleaned-name counts, but catches two different title *forms* of the same
+    // content. Used to reject a deferred cross-identity shift whose target
+    // identity another live stream already owns.
+    let mut identity_counts: HashMap<String, usize> = HashMap::new();
+    for a in &active_apps {
+        if let Some(key) = a
+            .pid
+            .and_then(|pid| crate::media_session::match_identity(pid, &a.app_name))
+        {
+            *identity_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
     // Remember every prior channel's art by logical identity *before* processing.
     // This deliberately captures streams that are about to disappear this refresh
     // (their uid is gone from the active set): a recreated stream's successor,
@@ -526,18 +587,47 @@ pub async fn update_mixer_channels(
             // subtitle Firefox keeps reporting in media.name) is not a content
             // change — dropping art and re-anchoring on it would churn every
             // refresh.
-            let shifted_within_identity = app
+            let new_identity = app
                 .pid
-                .zip(identity_of_path(prev.mpris_art_path.as_ref()))
-                .map(|(pid, key)| {
-                    crate::media_session::match_identity(pid, &app.app_name).as_deref()
-                        == Some(key)
-                })
-                .unwrap_or(false);
-            let name_shifted = !crate::mpris::is_generic_name(&app.app_name)
+                .and_then(|pid| crate::media_session::match_identity(pid, &app.app_name));
+            let prev_identity =
+                identity_of_path(prev.mpris_art_path.as_ref()).map(str::to_string);
+            let shifted_within_identity =
+                prev_identity.is_some() && new_identity == prev_identity;
+            let raw_shift = !crate::mpris::is_generic_name(&app.app_name)
                 && app.app_name != prev.app_name
                 && !title_collides(app.pid, &app.app_name)
                 && !shifted_within_identity;
+
+            // A shift from one known identity to a DIFFERENT one is deferred:
+            // Firefox re-tags existing sink-inputs with the active session's
+            // title when another tab starts playing, and that lie lands before
+            // the other tab's own sink-input exists (so nothing collides yet).
+            // Only an uncontested shift is believed; if the title's real owner
+            // appears within the window (identity or title collision), the
+            // pending shift is dropped. Genuine same-tab navigations (e.g. an
+            // FFZ AudioContext surviving a Twitch→Kick navigation) confirm
+            // after SHIFT_CONFIRM and relabel a couple refreshes late.
+            let cross_identity = prev_identity.is_some()
+                && new_identity.is_some()
+                && new_identity != prev_identity;
+            let name_shifted = if raw_shift && cross_identity {
+                let identity_taken = new_identity
+                    .as_ref()
+                    .map(|k| identity_counts.get(k).copied().unwrap_or(0) > 1)
+                    .unwrap_or(false);
+                confirm_deferred_shift(
+                    &mut prev.pending_name_shift,
+                    &app.app_name,
+                    now,
+                    identity_taken,
+                )
+            } else {
+                if !raw_shift {
+                    prev.pending_name_shift = None;
+                }
+                raw_shift
+            };
 
             if name_shifted {
                 prev.locked = false;
@@ -793,6 +883,7 @@ pub async fn update_mixer_channels(
                 mpris_art_path,
                 first_seen,
                 art_resolved,
+                pending_name_shift: None,
                 locked,
                 is_device: app.is_device,
                 is_multi_sink_app: app.is_multi_sink_app,
@@ -937,6 +1028,46 @@ mod tests {
             None
         );
         forget(pid);
+    }
+
+    #[test]
+    fn deferred_shift_confirms_only_after_uncontested_window() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mut pending = None;
+
+        // First sighting: recorded, not applied.
+        assert!(!confirm_deferred_shift(&mut pending, "Kick Title", t0, false));
+        assert!(pending.is_some());
+        // Still inside the window: not applied.
+        let t1 = t0 + std::time::Duration::from_secs(2);
+        assert!(!confirm_deferred_shift(&mut pending, "Kick Title", t1, false));
+        // Window elapsed, uncontested: confirmed, pending cleared.
+        let t2 = t0 + SHIFT_CONFIRM;
+        assert!(confirm_deferred_shift(&mut pending, "Kick Title", t2, false));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn deferred_shift_cancelled_when_identity_owner_appears() {
+        // The lie: the proposed title's real owner (the other tab's own
+        // sink-input) shows up during the window → pending dropped.
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mut pending = None;
+        assert!(!confirm_deferred_shift(&mut pending, "Kick Title", t0, false));
+        let t2 = t0 + SHIFT_CONFIRM;
+        assert!(!confirm_deferred_shift(&mut pending, "Kick Title", t2, true));
+        assert!(pending.is_none(), "contested shift is dropped, not deferred");
+    }
+
+    #[test]
+    fn deferred_shift_resets_when_proposed_name_changes() {
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let mut pending = None;
+        assert!(!confirm_deferred_shift(&mut pending, "Title A", t0, false));
+        // A different proposal restarts the window.
+        let t2 = t0 + SHIFT_CONFIRM;
+        assert!(!confirm_deferred_shift(&mut pending, "Title B", t2, false));
+        assert_eq!(pending.as_ref().map(|(n, _)| n.as_str()), Some("Title B"));
     }
 
     #[test]
