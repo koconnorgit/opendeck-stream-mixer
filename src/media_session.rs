@@ -422,6 +422,7 @@ struct MetaFields {
     title: Option<String>,
     artist: Option<String>,
     art_url: Option<String>,
+    playback: Option<String>,
 }
 
 impl MetaFields {
@@ -433,6 +434,7 @@ impl MetaFields {
         self.title = later.title.or(self.title.take());
         self.artist = later.artist.or(self.artist.take());
         self.art_url = later.art_url.or(self.art_url.take());
+        self.playback = later.playback.or(self.playback.take());
     }
 
     fn from_metadata_dict(dict: &HashMap<String, OwnedValue>) -> Self {
@@ -450,6 +452,7 @@ impl MetaFields {
             title: get_str("xesam:title"),
             artist,
             art_url: get_str("mpris:artUrl"),
+            playback: None,
         }
     }
 }
@@ -466,12 +469,16 @@ async fn watch_player(conn: zbus::Connection, bus_name: String, pid: u32) {
     };
     let Ok(props) = props.await else { return };
 
+    // The identity this player most recently reported, so a status-only
+    // "Playing" signal (no metadata change) can be attributed to it.
+    let mut last_key: Option<String> = None;
+
     // Cold start: read the current metadata once — no ambiguity, no timing.
     let iface = zbus::names::InterfaceName::try_from("org.mpris.MediaPlayer2.Player").ok();
     if let Some(iface) = &iface {
         if let Ok(meta) = props.get(iface.clone(), "Metadata").await {
             if let Ok(dict) = HashMap::<String, OwnedValue>::try_from(meta) {
-                record_update(pid, MetaFields::from_metadata_dict(&dict));
+                last_key = record_update(pid, MetaFields::from_metadata_dict(&dict));
             }
         }
     }
@@ -495,31 +502,69 @@ async fn watch_player(conn: zbus::Connection, bus_name: String, pid: u32) {
                 Err(_) => break,    // window closed
             }
         }
-        record_update(pid, fields);
+        let playing = fields.playback.as_deref() == Some("Playing");
+        if let Some(key) = record_update(pid, fields) {
+            last_key = Some(key);
+        } else if playing {
+            // Status-only signal: the active session just (re)started playing
+            // — e.g. an in-browser unmute of the tab that already held the
+            // session. Freshen its record so identity recovery sees it.
+            if let Some(key) = &last_key {
+                bump_session(pid, key);
+            }
+        }
     }
 }
 
-/// Extract MetaFields from one PropertiesChanged signal (Player interface
-/// Metadata only; other property updates carry no identity).
+/// Mark a session as active *now* (a status-only Playing signal) and queue a
+/// refresh so a still-generic returning stream can adopt it.
+fn bump_session(pid: u32, key: &str) {
+    {
+        let mut sessions = SESSIONS.lock().unwrap();
+        let Some(rec) = sessions.get_mut(&(pid, key.to_string())) else {
+            return;
+        };
+        rec.last_active = SystemTime::now();
+        rec.dormant_since = None;
+    }
+    println!("MPRIS-WATCH playing: pid={pid} {key}");
+    crate::audio::pulse::pulse_monitor::request_refresh();
+}
+
+/// Extract MetaFields from one PropertiesChanged signal (Player interface).
+/// Metadata carries identity; a PlaybackStatus flip matters too — unmuting a
+/// tab that ALREADY holds the active session changes no metadata, and the
+/// status transition is the only signal that content just started playing.
 fn fields_from_signal(signal: &zbus::fdo::PropertiesChanged) -> Option<MetaFields> {
     let args = signal.args().ok()?;
     if args.interface_name.as_str() != "org.mpris.MediaPlayer2.Player" {
         return None;
     }
-    let meta = args.changed_properties.get("Metadata")?;
-    let owned = meta.try_to_owned().ok()?;
-    let dict = HashMap::<String, OwnedValue>::try_from(owned).ok()?;
-    Some(MetaFields::from_metadata_dict(&dict))
+    let mut fields = args
+        .changed_properties
+        .get("Metadata")
+        .and_then(|meta| meta.try_to_owned().ok())
+        .and_then(|owned| HashMap::<String, OwnedValue>::try_from(owned).ok())
+        .map(|dict| MetaFields::from_metadata_dict(&dict))
+        .unwrap_or_default();
+    fields.playback = args
+        .changed_properties
+        .get("PlaybackStatus")
+        .and_then(|v| v.try_to_owned().ok())
+        .and_then(|owned| String::try_from(owned).ok());
+    (fields.url.is_some() || fields.title.is_some() || fields.playback.is_some())
+        .then_some(fields)
 }
 
 /// Fold one coalesced update into the session table, capturing art bytes
 /// immediately (the on-disk file is deleted on the next session change).
-fn record_update(pid: u32, fields: MetaFields) {
+/// Returns the session key when the update carried an identity.
+fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
     let (Some(url), Some(title)) = (&fields.url, &fields.title) else {
-        return;
+        return None;
     };
     let Some(identity) = identity_from_url(url, title) else {
-        return;
+        return None;
     };
     let key = identity.key();
 
@@ -576,6 +621,7 @@ fn record_update(pid: u32, fields: MetaFields) {
     // the race — this (debounced) refresh is what lets the still-generic
     // channel re-identify. Also freshens `last_active` for recovery windows.
     crate::audio::pulse::pulse_monitor::request_refresh();
+    Some(key)
 }
 
 /// Test-only helpers for seeding the session table from other modules' tests
