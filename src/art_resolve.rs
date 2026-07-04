@@ -3,10 +3,13 @@
 //!
 //! When a channel's identity is known but the browser never published art for
 //! it (or the session predates the plugin), the art can be fetched from the
-//! site directly: YouTube thumbnails by video id, Twitch live previews by
-//! login (decided 2026-07-04: session art primary, preview CDN fallback —
-//! both URLs need no auth). Kick is NOT handled here; `kick.rs` already owns
-//! that fetch, keyed by slug.
+//! site directly: YouTube video thumbnails by video id, Twitch streamer
+//! avatars by login. Art must always be the avatar or content thumbnail —
+//! NEVER a live-stream screenshot (user decision 2026-07-04; the preview-CDN
+//! fallback was shipped and rejected on sight). The Twitch avatar URL is
+//! resolved through decapi.me — a third-party, no-auth, plain-text resolver —
+//! because Twitch's own avatar API (Helix) needs a registered key. Kick is
+//! NOT handled here; `kick.rs` already owns that fetch, keyed by slug.
 //!
 //! Same cache/backoff state machine and curl transport as `kick.rs` (see its
 //! module docs for why curl-the-binary). Images are center-cropped square so
@@ -38,15 +41,29 @@ enum Entry {
 static CACHE: LazyLock<Mutex<HashMap<String, Entry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// The deterministic source URL for an identity key, if one exists.
-fn fetch_url_for(key: &str) -> Option<String> {
+/// Whether an identity key has a deterministic fetcher here.
+fn has_fetcher(key: &str) -> bool {
+    key.starts_with("yt:") || key.starts_with("ttv:")
+}
+
+/// decapi answers with the avatar URL as plain text (or an error sentence,
+/// e.g. "User not found"). Only a clean single-token https URL is trusted.
+fn parse_decapi_avatar(resp: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(resp).ok()?.trim();
+    (s.starts_with("https://") && !s.contains(char::is_whitespace)).then(|| s.to_string())
+}
+
+/// Blocking: resolve an identity to raw image bytes.
+fn fetch_art_bytes(key: &str) -> Option<Vec<u8>> {
     if let Some(id) = key.strip_prefix("yt:") {
-        return Some(format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"));
+        // The video thumbnail (what the user sees in search/suggestions).
+        return crate::kick::curl_get(&format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"));
     }
     if let Some(login) = key.strip_prefix("ttv:") {
-        return Some(format!(
-            "https://static-cdn.jtvnw.net/previews-ttv/live_user_{login}-320x180.jpg"
-        ));
+        // The streamer avatar — two hops: decapi resolves login → avatar URL.
+        let resp = crate::kick::curl_get(&format!("https://decapi.me/twitch/avatar/{login}"))?;
+        let url = parse_decapi_avatar(&resp)?;
+        return crate::kick::curl_get(&url);
     }
     None
 }
@@ -55,9 +72,9 @@ fn fetch_url_for(key: &str) -> Option<String> {
 /// key kicks off a background fetch and reports `Pending`; the completed fetch
 /// nudges a refresh so the mixer re-renders with the result.
 pub fn resolve(key: &str) -> ArtState {
-    let Some(url) = fetch_url_for(key) else {
+    if !has_fetcher(key) {
         return ArtState::Unavailable;
-    };
+    }
     let mut cache = CACHE.lock().unwrap();
     match cache.get(key) {
         Some(Entry::Ready(bytes)) => ArtState::Ready(bytes.clone()),
@@ -65,7 +82,7 @@ pub fn resolve(key: &str) -> ArtState {
         Some(Entry::Failed(at)) if at.elapsed() < FAILURE_BACKOFF => ArtState::Unavailable,
         _ => {
             cache.insert(key.to_string(), Entry::Fetching);
-            spawn_fetch(key.to_string(), url);
+            spawn_fetch(key.to_string());
             ArtState::Pending
         }
     }
@@ -73,9 +90,10 @@ pub fn resolve(key: &str) -> ArtState {
 
 /// Fetch one identity's art off-thread, cache the result, and queue a
 /// (debounced, panic-guarded) refresh so the mixer picks it up.
-fn spawn_fetch(key: String, url: String) {
+fn spawn_fetch(key: String) {
     tokio::spawn(async move {
-        let fetched = tokio::task::spawn_blocking(move || fetch_square_png(&url))
+        let fetch_key = key.clone();
+        let fetched = tokio::task::spawn_blocking(move || fetch_square_png(&fetch_key))
             .await
             .unwrap_or(None);
         {
@@ -94,10 +112,10 @@ fn spawn_fetch(key: String, url: String) {
     });
 }
 
-/// Blocking: GET an image, center-crop it square, re-encode as PNG (the icon
-/// pipeline treats art as PNG, incl. the grayscale-on-mute step).
-fn fetch_square_png(url: &str) -> Option<Vec<u8>> {
-    let bytes = crate::kick::curl_get(url)?;
+/// Blocking: fetch an identity's image, center-crop it square, re-encode as
+/// PNG (the icon pipeline treats art as PNG, incl. the grayscale-on-mute step).
+fn fetch_square_png(key: &str) -> Option<Vec<u8>> {
+    let bytes = fetch_art_bytes(key)?;
     let img = image::load_from_memory(&bytes).ok()?;
     square_png(img)
 }
@@ -120,18 +138,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_urls_by_identity() {
-        assert_eq!(
-            fetch_url_for("yt:eAz9dcpAz-Q").as_deref(),
-            Some("https://i.ytimg.com/vi/eAz9dcpAz-Q/mqdefault.jpg")
-        );
-        assert_eq!(
-            fetch_url_for("ttv:nmplol").as_deref(),
-            Some("https://static-cdn.jtvnw.net/previews-ttv/live_user_nmplol-320x180.jpg")
-        );
+    fn fetchers_by_identity() {
+        assert!(has_fetcher("yt:eAz9dcpAz-Q"));
+        assert!(has_fetcher("ttv:nmplol"));
         // Kick is owned by kick.rs; generic web has no fetcher.
-        assert_eq!(fetch_url_for("kick:xqc"), None);
-        assert_eq!(fetch_url_for("web:reddit.com:r/livestreamfail"), None);
+        assert!(!has_fetcher("kick:xqc"));
+        assert!(!has_fetcher("web:reddit.com:r/livestreamfail"));
+    }
+
+    #[test]
+    fn decapi_avatar_url_parsed_and_errors_rejected() {
+        assert_eq!(
+            parse_decapi_avatar(
+                b"https://static-cdn.jtvnw.net/jtv_user_pictures/abc-profile_image-300x300.png\n"
+            )
+            .as_deref(),
+            Some("https://static-cdn.jtvnw.net/jtv_user_pictures/abc-profile_image-300x300.png")
+        );
+        assert_eq!(parse_decapi_avatar(b"User not found"), None);
+        assert_eq!(parse_decapi_avatar(b""), None);
+    }
+
+    // Live check against decapi + Twitch's CDN (needs network + curl). Run with:
+    //   cargo test -- --ignored --nocapture live_fetch_twitch_avatar
+    #[test]
+    #[ignore]
+    fn live_fetch_twitch_avatar() {
+        let png = fetch_square_png("ttv:nmplol").expect("expected an avatar");
+        let img = image::load_from_memory(&png).expect("decodes as PNG");
+        use image::GenericImageView;
+        let (w, h) = img.dimensions();
+        println!("avatar: {} bytes, {}x{}", png.len(), w, h);
+        assert_eq!(w, h, "avatar is square");
     }
 
     #[test]

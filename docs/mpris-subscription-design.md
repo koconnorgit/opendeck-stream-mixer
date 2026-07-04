@@ -6,7 +6,8 @@ Status: phase 2 (art switchover) live since 2026-07-04 — `media_session.rs`
 `MPRIS-WATCH` / `SHADOW` / `ART-RESOLVE`. Phase-1 soak scored 2026-07-04:
 watcher flawless (0 errors, 22/25 art captures); it caught two matching bugs
 (uncleaned title join, kick.com/browse-as-channel), both fixed with tests.
-Twitch art decided: session art primary, preview CDN fallback. NOTE — phase 2
+Twitch art: session art primary, decapi avatar fallback (preview CDN was
+shipped and rejected — never screenshots, see HARD RULE below). NOTE — phase 2
 was implemented additively: identity art is a post-pass that *overrides* the
 legacy pipeline, claimed under a synthetic `identity://<key>` path so the
 existing claim-exclusion + ART_MEMORY recovery plumbing keeps working; the
@@ -153,10 +154,15 @@ pattern (Cloudflare constraint stays):
 
 | Identity | Primary source | Fallback |
 |---|---|---|
-| YouTube  | session art bytes (browser ground truth) | `https://i.ytimg.com/vi/<id>/mqdefault.jpg` (no auth) |
-| Twitch   | session art bytes | avatar via decapi / Helix (needs decision) or `static-cdn.jtvnw.net/previews-ttv/live_user_<login>-320x180.jpg` (no auth, stream screenshot) |
+| YouTube  | session art bytes (browser ground truth) | `https://i.ytimg.com/vi/<id>/mqdefault.jpg` — the video thumbnail (no auth) |
+| Twitch   | session art bytes (Twitch publishes its 150×150 avatar as Media Session artwork) | streamer avatar via decapi (`decapi.me/twitch/avatar/<login>`, third-party plain-text resolver, no auth) |
 | Kick     | existing `kick.rs` avatar fetch by slug (unchanged, keyed off URL slug when available, title parse otherwise) | — |
 | Web      | session art bytes | none (themed icon path) |
+
+HARD RULE (user, 2026-07-04): art is always the streamer avatar or the
+content thumbnail — never a live-stream screenshot. The preview CDN
+(`previews-ttv`) was shipped as the Twitch fallback and rejected on sight;
+do not reintroduce it.
 
 Notes:
 - Session art always wins when present — it is exactly what the site
@@ -249,10 +255,11 @@ fn reconcile(
 
 ## Risks / open questions
 
-- **Twitch avatar source** — DECIDED (2026-07-04): session art primary,
-  preview CDN (`static-cdn.jtvnw.net/previews-ttv/live_user_<login>-320x180.jpg`,
-  no auth) as fallback. Revisit real avatars (decapi/Helix) only if this
-  proves unsatisfying.
+- **Twitch avatar source** — DECIDED (2026-07-04, revised same day): session
+  art primary (it is the avatar), decapi avatar resolver as fallback. The
+  preview CDN was tried and rejected (stream screenshot — violates the hard
+  rule above). decapi is a third-party service; if it becomes unreliable,
+  the replacement is Helix with a registered key, not the preview CDN.
 - **Chromium**: exposes `org.mpris.MediaPlayer2.chromium.instance<pid>` with
   the same single-active-session shape; `media.name` there is usually
   generic ("Playback"), so the watcher *improves* Chromium support for free,

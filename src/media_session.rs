@@ -278,7 +278,7 @@ fn shadow_match(pid: u32, media_name: &str) -> Option<(String, ShadowArt)> {
     } else if key.starts_with("yt:") {
         ShadowArt::Fetch("yt-thumbnail")
     } else if key.starts_with("ttv:") {
-        ShadowArt::Fetch("ttv-preview-cdn")
+        ShadowArt::Fetch("ttv-avatar")
     } else if key.starts_with("kick:") {
         ShadowArt::Fetch("kick-avatar-api")
     } else {
@@ -713,9 +713,9 @@ mod tests {
     }
 
     #[test]
-    fn shadow_match_twitch_without_session_falls_back_to_cdn() {
+    fn shadow_match_twitch_without_session_falls_back_to_avatar_fetch() {
         let m = shadow_match(910_002, "Nmplol - Twitch");
         assert_eq!(m.as_ref().map(|(k, _)| k.as_str()), Some("ttv:nmplol"));
-        assert!(matches!(m.unwrap().1, ShadowArt::Fetch("ttv-preview-cdn")));
+        assert!(matches!(m.unwrap().1, ShadowArt::Fetch("ttv-avatar")));
     }
 }
