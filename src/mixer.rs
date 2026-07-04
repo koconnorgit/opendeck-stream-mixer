@@ -80,6 +80,45 @@ pub static MIXER_CHANNELS: LazyLock<Mutex<HashMap<u8, MixerChannel>>> =
 pub static ENCODER_TO_CHANNEL_MAP: LazyLock<Mutex<HashMap<u8, u8>>> =
     LazyLock::new(|| Mutex::const_new(HashMap::new()));
 
+/// Identities whose channels recently disappeared (in-browser mute destroys
+/// the sink-input), remembered so the stream's recreation can take its
+/// identity back: (pid, identity) → departed-at. Third recovery tier — a
+/// returning stream whose tab never re-signals (another tab holds the active
+/// session) is neither "fresh" nor "newest", but if exactly ONE identity
+/// recently departed on the PID, it is almost certainly this stream.
+static DEPARTED_IDENTITIES: LazyLock<std::sync::Mutex<HashMap<(u32, String), SystemTime>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// How long a departed identity stays adoptable. Long enough for multi-minute
+/// in-browser mutes; short enough that yesterday's tabs can't be grafted onto
+/// unrelated streams.
+const DEPARTED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Adopt the unique recently-departed, unworn identity on this PID, or refuse.
+fn recover_departed_identity(
+    pid: u32,
+    worn: &HashSet<String>,
+    now: SystemTime,
+) -> Option<String> {
+    let departed = DEPARTED_IDENTITIES.lock().unwrap();
+    let mut candidates = departed
+        .iter()
+        .filter(|((p, key), at)| {
+            *p == pid
+                && !worn.contains(key)
+                && now
+                    .duration_since(**at)
+                    .map(|age| age < DEPARTED_TTL)
+                    .unwrap_or(true)
+        })
+        .map(|((_, key), _)| key.clone());
+    let candidate = candidates.next()?;
+    if candidates.next().is_some() {
+        return None; // Ambiguous — never guess which returning stream this is.
+    }
+    Some(candidate)
+}
+
 /// How long a cross-identity name shift must persist, uncontested, before it
 /// is believed. Long enough for the title's real owner (the other tab's own
 /// sink-input) to appear and collide; short enough that a genuine same-tab
@@ -257,6 +296,29 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         col_key += 1;
     }
 
+    // Maintain the departed-identity memory: channels left in previous_by_uid
+    // were not matched by any live stream this refresh — their identities
+    // become adoptable; identities now worn by a live channel stop being
+    // "departed" (the stream came back).
+    {
+        let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+        departed.retain(|_, at| {
+            now.duration_since(*at)
+                .map(|age| age < DEPARTED_TTL)
+                .unwrap_or(true)
+        });
+        for ch in previous_by_uid.values() {
+            if let (Some(pid), Some(key)) = (ch.pid, ch.identity.clone()) {
+                departed.insert((pid, key), now);
+            }
+        }
+        for ch in new_channels.values() {
+            if let (Some(pid), Some(key)) = (ch.pid, ch.identity.clone()) {
+                departed.remove(&(pid, key));
+            }
+        }
+    }
+
     *channels = new_channels;
 
     println!(
@@ -327,10 +389,10 @@ fn reconcile_existing(
         // Upgrade FROM generic only, and never to a colliding title.
         if !crate::mpris::is_generic_name(raw) && !title_collides(app.pid, raw) {
             prev.app_name = raw.clone();
-        } else if let Some(key) = app
-            .pid
-            .and_then(|pid| media_session::recover_recent_identity(pid, recovery_worn, now))
-        {
+        } else if let Some(key) = app.pid.and_then(|pid| {
+            media_session::recover_recent_identity(pid, recovery_worn, now)
+                .or_else(|| recover_departed_identity(pid, recovery_worn, now))
+        }) {
             // A returning stream is created ~100ms after the PulseAudio event,
             // but Firefox flips its active media session to the unmuted tab a
             // beat later — so creation-time recovery races the session signal
@@ -388,10 +450,13 @@ fn build_new(
 
     let (identity, app_name) = if untrusted {
         // The tab that just started playing is almost always the freshest
-        // media session on this PID (an unmute re-activates it *now*).
-        let recovered = app
-            .pid
-            .and_then(|pid| media_session::recover_recent_identity(pid, recovery_worn, now));
+        // media session on this PID (an unmute re-activates it *now*); when it
+        // never re-signals (another tab holds the active session), the unique
+        // recently-departed identity is the fallback.
+        let recovered = app.pid.and_then(|pid| {
+            media_session::recover_recent_identity(pid, recovery_worn, now)
+                .or_else(|| recover_departed_identity(pid, recovery_worn, now))
+        });
         match recovered {
             Some(key) => {
                 let name = app
@@ -676,6 +741,40 @@ mod tests {
         );
         assert_eq!(out.identity, None);
         assert_eq!(out.app_name, "AudioStream", "lie name not adopted");
+    }
+
+    #[test]
+    fn departed_identity_recovered_only_when_unique_and_unworn() {
+        let pid = 920_010;
+        let now = SystemTime::now();
+        {
+            let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+            departed.insert((pid, "kick:b".into()), now);
+        }
+        // Unique departed identity → adopted.
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("kick:b")
+        );
+        // Worn → refused.
+        let worn: HashSet<String> = [String::from("kick:b")].into();
+        assert_eq!(recover_departed_identity(pid, &worn, now), None);
+        // Two departed identities → ambiguous, refused.
+        DEPARTED_IDENTITIES
+            .lock()
+            .unwrap()
+            .insert((pid, "ttv:c".into()), now);
+        assert_eq!(recover_departed_identity(pid, &HashSet::new(), now), None);
+        // Expired entries don't count.
+        {
+            let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+            departed.insert((pid, "ttv:c".into()), now - DEPARTED_TTL);
+        }
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("kick:b")
+        );
+        DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
     #[test]
