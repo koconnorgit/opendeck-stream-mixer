@@ -547,6 +547,39 @@ fn record_update(pid: u32, fields: MetaFields) {
             });
         }
     }
+    drop(sessions);
+
+    // A session change is a naming/art signal the mixer must see: a stream
+    // recreated by an in-browser unmute is born ~1-2s BEFORE Firefox flips the
+    // active session to its tab, so the refresh that created its channel lost
+    // the race — this (debounced) refresh is what lets the still-generic
+    // channel re-identify. Also freshens `last_active` for recovery windows.
+    crate::audio::pulse::pulse_monitor::request_refresh();
+}
+
+/// Test-only helpers for seeding the session table from other modules' tests
+/// (each test uses a private PID so the process-global table stays isolated).
+#[cfg(test)]
+pub fn test_seed_session(pid: u32, key: &str, title: &str, last_active: SystemTime) {
+    SESSIONS.lock().unwrap().insert(
+        (pid, key.to_string()),
+        SessionRecord {
+            identity: MediaIdentity::Web {
+                host: "test".into(),
+                title: title.into(),
+            },
+            title: title.to_string(),
+            artist: None,
+            art: None,
+            last_active,
+            dormant_since: None,
+        },
+    );
+}
+
+#[cfg(test)]
+pub fn test_clear_sessions(pid: u32) {
+    SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
 }
 
 #[cfg(test)]

@@ -214,6 +214,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
                 raw_identity,
                 &title_collides,
                 &identity_counts,
+                &recovery_worn,
                 now,
             ),
             None => build_new(
@@ -263,6 +264,7 @@ fn reconcile_existing(
     raw_identity: Option<String>,
     title_collides: &dyn Fn(Option<u32>, &str) -> bool,
     identity_counts: &HashMap<String, usize>,
+    recovery_worn: &HashSet<String>,
     now: SystemTime,
 ) -> MixerChannel {
     let raw = &app.app_name;
@@ -316,6 +318,26 @@ fn reconcile_existing(
         // Upgrade FROM generic only, and never to a colliding title.
         if !crate::mpris::is_generic_name(raw) && !title_collides(app.pid, raw) {
             prev.app_name = raw.clone();
+        } else if let Some(key) = app
+            .pid
+            .and_then(|pid| media_session::recover_recent_identity(pid, recovery_worn, now))
+        {
+            // A returning stream is created ~100ms after the PulseAudio event,
+            // but Firefox flips its active media session to the unmuted tab a
+            // beat later — so creation-time recovery races the session signal
+            // and can lose. A still-generic channel must keep retrying on
+            // later refreshes (the watcher queues one when the session lands),
+            // or "AudioStream" sticks forever.
+            let name = app
+                .pid
+                .and_then(|pid| media_session::display_name_for(pid, &key))
+                .unwrap_or_else(|| prev.app_name.clone());
+            println!(
+                "Recovered identity {:?} ({}) for generic stream uid={}",
+                name, key, prev.uid
+            );
+            prev.identity = Some(key);
+            prev.app_name = name;
         }
     } else if raw != &prev.app_name
         && !crate::mpris::is_generic_name(raw)
@@ -603,6 +625,7 @@ mod tests {
             None,
             &no_collision(),
             &HashMap::new(),
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.app_name, "Nmplol - Twitch");
@@ -619,6 +642,7 @@ mod tests {
             Some("ttv:nmplol".into()),
             &no_collision(),
             &HashMap::new(),
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.identity.as_deref(), Some("ttv:nmplol"));
@@ -638,10 +662,71 @@ mod tests {
             Some("ttv:nmplol".into()),
             &no_collision(),
             &counts,
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.identity, None);
         assert_eq!(out.app_name, "AudioStream", "lie name not adopted");
+    }
+
+    #[test]
+    fn existing_generic_channel_recovers_identity_on_a_later_refresh() {
+        // The unmute race: the channel was created as "AudioStream" before the
+        // unmuted tab's session re-published. A later refresh (queued by the
+        // watcher when the session lands) must re-identify it.
+        let pid = 920_001;
+        crate::media_session::test_seed_session(
+            pid,
+            "kick:asmongold247",
+            "Asmongold247 Stream - Watch Live on Kick",
+            SystemTime::now(),
+        );
+        let mut prev = bare_channel("AudioStream", None, false);
+        prev.pid = Some(pid);
+        let a = {
+            let mut a = app(1, Some(pid), "AudioStream");
+            a.pid = Some(pid);
+            a
+        };
+        let out = reconcile_existing(
+            prev,
+            &a,
+            None,
+            &no_collision(),
+            &HashMap::new(),
+            &HashSet::new(),
+            SystemTime::now(),
+        );
+        assert_eq!(out.identity.as_deref(), Some("kick:asmongold247"));
+        assert_eq!(out.app_name, "Asmongold247 Stream - Watch Live on Kick");
+        crate::media_session::test_clear_sessions(pid);
+    }
+
+    #[test]
+    fn existing_generic_channel_never_recovers_a_worn_identity() {
+        let pid = 920_002;
+        crate::media_session::test_seed_session(
+            pid,
+            "kick:asmongold247",
+            "Asmongold247 Stream - Watch Live on Kick",
+            SystemTime::now(),
+        );
+        let mut prev = bare_channel("AudioStream", None, false);
+        prev.pid = Some(pid);
+        let a = app(1, Some(pid), "AudioStream");
+        let worn: HashSet<String> = [String::from("kick:asmongold247")].into();
+        let out = reconcile_existing(
+            prev,
+            &a,
+            None,
+            &no_collision(),
+            &HashMap::new(),
+            &worn,
+            SystemTime::now(),
+        );
+        assert_eq!(out.identity, None);
+        assert_eq!(out.app_name, "AudioStream");
+        crate::media_session::test_clear_sessions(pid);
     }
 
     #[test]
