@@ -514,6 +514,73 @@ async fn watch_player(conn: zbus::Connection, bus_name: String, pid: u32) {
             }
         }
     }
+    // A silently-ended signal stream costs up to REGISTRY_POLL of deafness
+    // before the registry respawns this task — make it visible.
+    println!("MPRIS-WATCH player stream ended: {bus_name}");
+}
+
+/// Minimum spacing between on-demand player polls.
+const POLL_COOLDOWN: Duration = Duration::from_secs(3);
+
+static LAST_POLL: LazyLock<Mutex<Option<std::time::Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// On-demand read of every MPRIS player's CURRENT Metadata — recovery's last
+/// resort when a returning stream fails every tier. Signals can be missed
+/// (player-task respawn gaps) and Firefox doesn't always emit on an unmute;
+/// a property read reports the active session regardless. Rate-limited;
+/// results flow through `record_update`, which freshens the session table and
+/// queues a refresh.
+pub fn poll_players_now() {
+    {
+        let mut last = LAST_POLL.lock().unwrap();
+        if last.map(|t| t.elapsed() < POLL_COOLDOWN).unwrap_or(false) {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    // No-op outside the runtime (unit tests drive the recovery paths directly).
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async {
+        let Ok(conn) = zbus::Connection::session().await else { return };
+        let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
+        let Ok(names) = dbus.list_names().await else { return };
+        let iface =
+            match zbus::names::InterfaceName::try_from("org.mpris.MediaPlayer2.Player") {
+                Ok(i) => i,
+                Err(_) => return,
+            };
+        for owned in names {
+            let name = owned.to_string();
+            if !name.starts_with("org.mpris.MediaPlayer2.") {
+                continue;
+            }
+            let Ok(bus_name) = zbus::names::BusName::try_from(name.as_str()) else {
+                continue;
+            };
+            let Ok(pid) = dbus.get_connection_unix_process_id(bus_name).await else {
+                continue;
+            };
+            let Ok(props) = zbus::fdo::PropertiesProxy::builder(&conn)
+                .destination(name.as_str())
+                .and_then(|b| b.path("/org/mpris/MediaPlayer2"))
+                .map(|b| b.build())
+            else {
+                continue;
+            };
+            let Ok(props) = props.await else { continue };
+            if let Ok(meta) = props.get(iface.clone(), "Metadata").await {
+                if let Ok(dict) = HashMap::<String, OwnedValue>::try_from(meta) {
+                    if let Some(key) = record_update(pid, MetaFields::from_metadata_dict(&dict))
+                    {
+                        println!("MPRIS-WATCH poll: pid={pid} active={key}");
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Mark a session as active *now* (a status-only Playing signal) and queue a

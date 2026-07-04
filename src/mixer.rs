@@ -105,6 +105,60 @@ const DEPARTED_FRESH: std::time::Duration = std::time::Duration::from_secs(15);
 /// recent — not just this exact refresh.
 const DEPARTED_INSTANT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// A deferred claim of a departed identity, keyed (pid, identity) GLOBALLY —
+/// not per channel — because a returning stream churns through several
+/// sink-input generations (each a new uid) before settling, and a per-channel
+/// window restarts with every generation (observed post-F5: the confirmation
+/// took 30s+ instead of 5s, leaving the label without its art).
+struct PendingClaim {
+    name: String,
+    first: SystemTime,
+    last: SystemTime,
+}
+
+static PENDING_CLAIMS: LazyLock<std::sync::Mutex<HashMap<(u32, String), PendingClaim>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Register/renew a claim of `key` under `name`; true once the claim has held
+/// uncontested for `SHIFT_CONFIRM` (across any number of stream generations).
+/// A different name restarts the window; a claim nobody renews goes stale.
+fn deferred_claim_confirmed(pid: u32, key: &str, name: &str, now: SystemTime) -> bool {
+    let mut claims = PENDING_CLAIMS.lock().unwrap();
+    claims.retain(|_, c| {
+        now.duration_since(c.last)
+            .map(|idle| idle < SHIFT_CONFIRM.saturating_mul(2))
+            .unwrap_or(true)
+    });
+    match claims.entry((pid, key.to_string())) {
+        std::collections::hash_map::Entry::Occupied(mut o) => {
+            let c = o.get_mut();
+            if c.name != name {
+                c.name = name.to_string();
+                c.first = now;
+                c.last = now;
+                return false;
+            }
+            c.last = now;
+            let held = now
+                .duration_since(c.first)
+                .map(|d| d >= SHIFT_CONFIRM)
+                .unwrap_or(false);
+            if held {
+                o.remove();
+            }
+            held
+        }
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(PendingClaim {
+                name: name.to_string(),
+                first: now,
+                last: now,
+            });
+            false
+        }
+    }
+}
+
 /// Whether an identity departed recently (TTL-valid) on this PID.
 fn identity_departed_recently(pid: Option<u32>, key: &str, now: SystemTime) -> bool {
     let Some(pid) = pid else { return false };
@@ -493,7 +547,11 @@ fn reconcile_existing(
         // window (the name may be the lie wearing a muted tab's title).
         if identity_counts.get(&key).copied().unwrap_or(0) <= 1 {
             if identity_departed_recently(app.pid, &key, now) {
-                if confirm_deferred_shift(&mut prev.pending_name_shift, raw, now, false) {
+                if app
+                    .pid
+                    .map(|pid| deferred_claim_confirmed(pid, &key, raw, now))
+                    .unwrap_or(false)
+                {
                     println!(
                         "Deferred adoption confirmed for uid={}: {}",
                         prev.uid, key
@@ -545,6 +603,10 @@ fn reconcile_existing(
                 "No identity for generic stream uid={} (worn: {:?})",
                 prev.uid, recovery_worn
             );
+            // Last resort: signals can be missed entirely (Firefox emits
+            // nothing on some unmutes; player tasks respawn with gaps) — read
+            // the players' CURRENT state directly. Rate-limited internally.
+            media_session::poll_players_now();
         }
     } else if raw != &prev.app_name
         && !crate::mpris::is_generic_name(raw)
@@ -584,7 +646,6 @@ fn build_new(
         || title_collides(app.pid, raw)
         || identity_taken;
 
-    let mut pending_name_shift: Option<(String, SystemTime)> = None;
     let (identity, app_name) = if untrusted && raw_identity.is_some() {
         // The stream names a specific identity that another live stream holds
         // (often its own dying husk from the same toggle). Recovering a
@@ -630,6 +691,9 @@ fn build_new(
                     "No identity for new stream uid={} (reported {:?}, worn: {:?})",
                     app.uid, raw, recovery_worn
                 );
+                // Last resort: read the players' CURRENT state directly (see
+                // the generic-retry path). Rate-limited internally.
+                media_session::poll_players_now();
                 (None, raw.clone())
             }
         }
@@ -640,12 +704,23 @@ fn build_new(
             // OTHER returning stream wearing that title (Firefox names new
             // sink-inputs after the active session — this is how muting
             // twitch+kick and unmuting in reverse order swapped both slots).
-            // Defer through the standard confirmation window: a genuine
-            // return keeps the title and confirms; the lie gets contested or
-            // renamed by later media.name updates.
+            // Defer through the global claim window (survives the stream's
+            // own uid churn): a genuine return keeps the title and confirms;
+            // the lie gets renamed by later media.name updates and resets it.
             Some(key) if identity_departed_recently(app.pid, &key, now) => {
-                confirm_deferred_shift(&mut pending_name_shift, raw, now, false);
-                (None, raw.clone())
+                if app
+                    .pid
+                    .map(|pid| deferred_claim_confirmed(pid, &key, raw, now))
+                    .unwrap_or(false)
+                {
+                    println!(
+                        "Deferred adoption confirmed for new stream uid={}: {}",
+                        app.uid, key
+                    );
+                    (Some(key), raw.clone())
+                } else {
+                    (None, raw.clone())
+                }
             }
             other => (other, raw.clone()),
         }
@@ -677,7 +752,7 @@ fn build_new(
         uses_default_icon,
         identity,
         art_data: None,
-        pending_name_shift,
+        pending_name_shift: None,
         is_device: app.is_device,
         is_multi_sink_app: app.is_multi_sink_app,
     }
@@ -1062,15 +1137,17 @@ mod tests {
         // Muting twitch+kick and unmuting in reverse order swapped slots: the
         // returning stream wears the OTHER muted tab's title (nothing live
         // contests it). A trusted-looking claim of a just-departed identity
-        // must ride the confirmation window instead of adopting instantly.
+        // must ride the confirmation window instead of adopting instantly —
+        // and the window is GLOBAL per (pid, identity), so it survives the
+        // returning stream churning through several uids (post-F5, per-channel
+        // windows restarted endlessly and art never came back).
         let pid = 920_020;
         let now = SystemTime::now();
         DEPARTED_IDENTITIES
             .lock()
             .unwrap()
             .insert((pid, "kick:knut".into()), now - std::time::Duration::from_secs(30));
-        let mut a = app(5, Some(pid), "Knut Stream - Watch Live on Kick");
-        a.pid = Some(pid);
+        let a = app(5, Some(pid), "Knut Stream - Watch Live on Kick");
         let out = build_new(
             &a,
             Some("kick:knut".into()),
@@ -1082,20 +1159,22 @@ mod tests {
         );
         assert_eq!(out.identity, None, "not adopted instantly");
         assert_eq!(out.app_name, "Knut Stream - Watch Live on Kick");
-        assert!(out.pending_name_shift.is_some(), "confirmation window armed");
 
-        // The window elapses uncontested → the existing-channel path confirms.
+        // The stream dies and a NEW generation (different uid) makes the same
+        // claim after the window: the global claim confirms across uids.
         let later = now + SHIFT_CONFIRM;
-        let confirmed = reconcile_existing(
-            out,
-            &a,
+        let b = app(6, Some(pid), "Knut Stream - Watch Live on Kick");
+        let out2 = build_new(
+            &b,
             Some("kick:knut".into()),
+            &HashSet::new(),
+            &HashSet::new(),
             &no_collision(),
             &HashMap::new(),
-            &HashSet::new(),
             later,
         );
-        assert_eq!(confirmed.identity.as_deref(), Some("kick:knut"));
+        assert_eq!(out2.identity.as_deref(), Some("kick:knut"));
         DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
+        PENDING_CLAIMS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 }
