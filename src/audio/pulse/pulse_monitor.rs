@@ -243,6 +243,12 @@ fn start_refresh_processor() {
     }
 }
 
+/// Queue a debounced full refresh, exactly as a PulseAudio event would.
+/// For background completions (art fetches) that need the mixer re-rendered.
+pub fn request_refresh() {
+    let _ = REFRESH_CHANNEL.0.send(());
+}
+
 /// Run a full refresh on its own task so a panic anywhere in the refresh
 /// pipeline is contained and logged instead of killing the caller. Refreshes
 /// run inside the debounced-refresh loop and openaction event handlers; an

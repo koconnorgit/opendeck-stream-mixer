@@ -1,5 +1,6 @@
 use openaction::OpenActionResult;
 
+mod art_resolve;
 mod audio;
 mod gfx;
 mod kick;

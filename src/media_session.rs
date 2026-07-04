@@ -142,7 +142,10 @@ pub fn identity_from_url(url: &str, title: &str) -> Option<MediaIdentity> {
             None => web(),
         },
         "kick.com" => match single_channel_segment(path) {
-            Some(slug) => Some(MediaIdentity::Kick { slug }),
+            Some(slug) if !KICK_NON_CHANNEL.contains(&slug.as_str()) => {
+                Some(MediaIdentity::Kick { slug })
+            }
+            Some(_) => web(),
             None if path.is_empty() => None,
             None => web(),
         },
@@ -154,6 +157,13 @@ pub fn identity_from_url(url: &str, title: &str) -> Option<MediaIdentity> {
 const TWITCH_NON_CHANNEL: &[&str] = &[
     "directory", "videos", "search", "settings", "subscriptions", "wallet",
     "drops", "downloads", "jobs", "turbo", "p",
+];
+
+/// Well-known kick.com paths that are site sections, not channel slugs
+/// (soak 2026-07-04 caught `kick.com/browse` parsing as a channel).
+const KICK_NON_CHANNEL: &[&str] = &[
+    "browse", "categories", "category", "following", "search", "messages",
+    "dashboard", "help", "terms", "privacy", "transcripts",
 ];
 
 /// A path that is exactly one `[A-Za-z0-9_]+` segment → lowercased channel name.
@@ -199,50 +209,82 @@ impl std::fmt::Display for ShadowArt {
     }
 }
 
-fn session_art_len(pid: u32, key: &str) -> Option<usize> {
+/// Match one sink-input to a learned identity, per the design's matching
+/// order: self-identifying `media.name` first (Twitch/Kick carry the channel
+/// in the name), then a boilerplate-cleaned title match against sessions
+/// learned on this PID (YouTube, generic sites). Both sides go through
+/// `clean_stream_title` — `media.name` carries `" - YouTube"`-style suffixes
+/// that `xesam:title` lacks (soak 2026-07-04 caught this). No
+/// collision-recovery here; that stays in the mixer until phase 3.
+pub fn match_identity(pid: u32, media_name: &str) -> Option<String> {
+    if let Some(login) = twitch_login_from_media_name(media_name) {
+        return Some(format!("ttv:{login}"));
+    }
+    if let Some(slug) = crate::kick::kick_slug(media_name) {
+        return Some(format!("kick:{slug}"));
+    }
+    let wanted = crate::mpris::clean_stream_title(media_name).to_lowercase();
+    if wanted.is_empty() || crate::mpris::is_generic_name(&wanted) {
+        return None;
+    }
     let sessions = SESSIONS.lock().unwrap();
     sessions
-        .get(&(pid, key.to_string()))
-        .and_then(|r| r.art.as_ref().map(|a| a.len()))
+        .iter()
+        .find(|((p, _), rec)| {
+            *p == pid && crate::mpris::clean_stream_title(&rec.title).to_lowercase() == wanted
+        })
+        .map(|((_, key), _)| key.clone())
 }
 
-/// Match one sink-input to an identity + art source, per the design's matching
-/// order: self-identifying `media.name` (Twitch/Kick/exact-title), no
-/// collision-recovery here (phase 1 observes; it doesn't re-identify).
-fn shadow_match(pid: u32, media_name: &str) -> Option<(String, ShadowArt)> {
-    // 1. Twitch: media.name carries the channel.
-    if let Some(login) = twitch_login_from_media_name(media_name) {
-        let key = format!("ttv:{login}");
-        let art = match session_art_len(pid, &key) {
-            Some(len) => ShadowArt::Session(len),
-            None => ShadowArt::Fetch("ttv-preview-cdn"),
-        };
-        return Some((key, art));
-    }
-    // 2. Kick: media.name carries the slug.
-    if let Some(slug) = crate::kick::kick_slug(media_name) {
-        let key = format!("kick:{slug}");
-        let art = match session_art_len(pid, &key) {
-            Some(len) => ShadowArt::Session(len),
-            None => ShadowArt::Fetch("kick-avatar-api"),
-        };
-        return Some((key, art));
-    }
-    // 3. Exact title match against learned sessions on this PID (YouTube, Web).
-    let wanted = media_name.trim().to_lowercase();
+/// Browser-published art captured for a learned session, if any.
+pub fn session_art(pid: u32, key: &str) -> Option<Arc<Vec<u8>>> {
     let sessions = SESSIONS.lock().unwrap();
-    for ((p, key), rec) in sessions.iter() {
-        if *p != pid || rec.title.trim().to_lowercase() != wanted {
-            continue;
-        }
-        let art = match rec.art.as_ref() {
-            Some(a) => ShadowArt::Session(a.len()),
-            None if key.starts_with("yt:") => ShadowArt::Fetch("yt-thumbnail"),
-            None => ShadowArt::None,
-        };
-        return Some((key.clone(), art));
+    sessions.get(&(pid, key.to_string())).and_then(|r| r.art.clone())
+}
+
+/// The art decision for one sink-input (phase 2): session-captured art wins;
+/// YouTube/Twitch identities fall back to a deterministic fetch; Kick and
+/// generic identities without session art fall through to the legacy pipeline
+/// (the Kick avatar fetcher already covers `kick:`).
+pub enum ChannelArt {
+    Ready(String, Arc<Vec<u8>>),
+    /// Identity known, fetch in flight — the caller should stay unlocked.
+    Pending(String),
+    None,
+}
+
+pub fn channel_art(pid: u32, media_name: &str) -> ChannelArt {
+    let Some(key) = match_identity(pid, media_name) else {
+        return ChannelArt::None;
+    };
+    if let Some(bytes) = session_art(pid, &key) {
+        return ChannelArt::Ready(key, bytes);
     }
-    None
+    if key.starts_with("yt:") || key.starts_with("ttv:") {
+        return match crate::art_resolve::resolve(&key) {
+            crate::art_resolve::ArtState::Ready(bytes) => ChannelArt::Ready(key, bytes),
+            crate::art_resolve::ArtState::Pending => ChannelArt::Pending(key),
+            crate::art_resolve::ArtState::Unavailable => ChannelArt::None,
+        };
+    }
+    ChannelArt::None
+}
+
+/// Shadow view of the same decision, for the soak log.
+fn shadow_match(pid: u32, media_name: &str) -> Option<(String, ShadowArt)> {
+    let key = match_identity(pid, media_name)?;
+    let art = if let Some(bytes) = session_art(pid, &key) {
+        ShadowArt::Session(bytes.len())
+    } else if key.starts_with("yt:") {
+        ShadowArt::Fetch("yt-thumbnail")
+    } else if key.starts_with("ttv:") {
+        ShadowArt::Fetch("ttv-preview-cdn")
+    } else if key.starts_with("kick:") {
+        ShadowArt::Fetch("kick-avatar-api")
+    } else {
+        ShadowArt::None
+    };
+    Some((key, art))
 }
 
 /// Phase-1 hook, called at the end of `mixer::update_mixer_channels`: log what
@@ -634,6 +676,40 @@ mod tests {
         assert_eq!(m.as_ref().map(|(k, _)| k.as_str()), Some("yt:abc123"));
         assert!(matches!(m.unwrap().1, ShadowArt::Session(2048)));
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn matches_suffixed_media_name_to_unsuffixed_session_title() {
+        // Soak 2026-07-04: media.name carries " - YouTube" boilerplate that
+        // xesam:title lacks; both sides must be cleaned before comparing.
+        let pid = 910_003;
+        SESSIONS.lock().unwrap().insert(
+            (pid, "yt:xyz789".into()),
+            SessionRecord {
+                identity: MediaIdentity::YouTube {
+                    video_id: "xyz789".into(),
+                },
+                title: "Cool Video".into(),
+                artist: None,
+                art: None,
+                last_active: SystemTime::now(),
+                dormant_since: None,
+            },
+        );
+        assert_eq!(
+            match_identity(pid, "Cool Video - YouTube").as_deref(),
+            Some("yt:xyz789")
+        );
+        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn kick_section_pages_are_not_channels() {
+        // Soak 2026-07-04: kick.com/browse parsed as channel "browse".
+        assert_eq!(
+            ident("https://kick.com/browse", "Browse - Kick Streaming").as_deref(),
+            Some("web:kick.com:browse - kick streaming")
+        );
     }
 
     #[test]

@@ -198,6 +198,64 @@ fn apply_art(
     channel.mpris_art_path = Some(path);
 }
 
+/// Outcome of the identity-first art attempt (phase 2 of
+/// docs/mpris-subscription-design.md).
+enum IdentityArt {
+    /// Identity art applied; the art decision is final for this refresh.
+    Applied,
+    /// Identity known but its fetch is in flight — keep the channel unlocked
+    /// so a later refresh can swap the art in (same contract as `kick_pending`).
+    Pending,
+    /// No identity/art — the legacy pipeline's decision stands.
+    Unresolved,
+}
+
+/// Phase 2: try to dress a channel in identity-keyed art (session-captured or
+/// deterministically fetched). Runs *after* the legacy pipeline so identity
+/// art wins when available and everything else is untouched. The art is
+/// claimed under a synthetic `identity://<key>` path so it flows through the
+/// existing claim-exclusion and ART_MEMORY plumbing (identity-recovery and
+/// art-inheritance keep working unchanged until phase 3 replaces them).
+fn try_identity_art(
+    channel: &mut MixerChannel,
+    icon_name: Option<String>,
+    icon_search_name: String,
+    claimed_paths: &mut HashSet<PathBuf>,
+) -> IdentityArt {
+    let Some(pid) = channel.pid else {
+        return IdentityArt::Unresolved;
+    };
+    match crate::media_session::channel_art(pid, &channel.app_name) {
+        crate::media_session::ChannelArt::Ready(key, bytes) => {
+            let path = PathBuf::from(format!("identity://{key}"));
+            if channel.mpris_art_path.as_ref() == Some(&path) {
+                // Already wearing this identity's art; keep the claim fresh.
+                claimed_paths.insert(path);
+                return IdentityArt::Applied;
+            }
+            if claimed_paths.contains(&path) {
+                // A live sibling already wears this identity (two tabs, same
+                // content) — don't double-claim.
+                return IdentityArt::Unresolved;
+            }
+            if let Some(old) = channel.mpris_art_path.take() {
+                claimed_paths.remove(&old);
+            }
+            apply_art(
+                channel,
+                icon_name,
+                icon_search_name,
+                path,
+                (*bytes).clone(),
+                claimed_paths,
+            );
+            IdentityArt::Applied
+        }
+        crate::media_session::ChannelArt::Pending(_) => IdentityArt::Pending,
+        crate::media_session::ChannelArt::None => IdentityArt::Unresolved,
+    }
+}
+
 /// Make (or defer) the art-claim decision for a channel. No-op once resolved.
 ///
 /// For an observed stream (`first_seen = Some`) it waits `SETTLE` for the art to
@@ -281,6 +339,11 @@ pub async fn create_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
 
     let mut col_key: u8 = 0;
     for app in active.into_iter() {
+        // Kept aside for the identity-art post-pass; `app`'s own copies are
+        // moved into the legacy pipeline below.
+        let pp_icon_name = app.icon_name.clone();
+        let pp_icon_search = app.icon_search_name.clone();
+
         // A Kick avatar (when already fetched) takes the MPRIS-art slot.
         let (icon_uri, icon_uri_mute, uses_default_icon) = get_app_icon_uri(
             app.icon_name.clone(),
@@ -337,6 +400,16 @@ pub async fn create_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         // Keep a Kick channel unlocked until its avatar fetch settles, so a later
         // refresh can swap in the avatar instead of locking the default icon.
         channel.locked = has_good_name && channel.art_resolved && !app.kick_pending;
+
+        // Phase 2: identity-keyed art overrides the legacy decision when known.
+        match try_identity_art(&mut channel, pp_icon_name, pp_icon_search, &mut claimed_paths) {
+            IdentityArt::Applied => {
+                channel.art_resolved = true;
+                channel.locked = has_good_name && !app.kick_pending;
+            }
+            IdentityArt::Pending => channel.locked = false,
+            IdentityArt::Unresolved => {}
+        }
 
         channels.insert(col_key, channel);
         col_key += 1;
@@ -417,7 +490,13 @@ pub async fn update_mixer_channels(
     let mut col_key: u8 = 0;
 
     for app in active_apps {
-        let channel = if let Some(mut prev) = previous_by_uid.remove(&app.uid) {
+        // Kept aside for the identity-art post-pass; `app`'s own copies are
+        // moved into the legacy pipeline below.
+        let pp_icon_name = app.icon_name.clone();
+        let pp_icon_search = app.icon_search_name.clone();
+        let pp_kick_pending = app.kick_pending;
+
+        let mut channel = if let Some(mut prev) = previous_by_uid.remove(&app.uid) {
             // Detect a media.name shift on the same sink-input (e.g. FFZ's
             // long-lived AudioContext keeps the same uid across Twitch
             // navigations). When this happens, unlock the slot, drop stale
@@ -691,6 +770,17 @@ pub async fn update_mixer_channels(
                 is_multi_sink_app: app.is_multi_sink_app,
             }
         };
+
+        // Phase 2: identity-keyed art overrides the legacy decision when known.
+        match try_identity_art(&mut channel, pp_icon_name, pp_icon_search, &mut claimed_paths) {
+            IdentityArt::Applied => {
+                channel.art_resolved = true;
+                channel.locked =
+                    !crate::mpris::is_generic_name(&channel.app_name) && !pp_kick_pending;
+            }
+            IdentityArt::Pending => channel.locked = false,
+            IdentityArt::Unresolved => {}
+        }
 
         new_channels.insert(col_key, channel);
         col_key += 1;

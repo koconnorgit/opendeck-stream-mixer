@@ -1,10 +1,18 @@
 # Design: MPRIS subscription + URL-keyed identity/art
 
-Status: phase 1 (shadow mode) implemented and soaking since 2026-07-04 —
-`src/media_session.rs`, grep the plugin log for `MPRIS-WATCH` / `SHADOW`.
-Twitch art decided: session art primary, preview CDN fallback. Replaces the
-file-timing art machinery in `mpris.rs`/`mixer.rs` with an event-driven
-media-session watcher and deterministic, URL-keyed art resolution.
+Status: phase 2 (art switchover) live since 2026-07-04 — `media_session.rs`
+(watcher + identity matching), `art_resolve.rs` (yt/ttv fetchers), and the
+`try_identity_art` post-pass in `mixer.rs`. Grep the plugin log for
+`MPRIS-WATCH` / `SHADOW` / `ART-RESOLVE`. Phase-1 soak scored 2026-07-04:
+watcher flawless (0 errors, 22/25 art captures); it caught two matching bugs
+(uncleaned title join, kick.com/browse-as-channel), both fixed with tests.
+Twitch art decided: session art primary, preview CDN fallback. NOTE — phase 2
+was implemented additively: identity art is a post-pass that *overrides* the
+legacy pipeline, claimed under a synthetic `identity://<key>` path so the
+existing claim-exclusion + ART_MEMORY recovery plumbing keeps working; the
+file-timing machinery deletion moves to phase 3. Replaces the file-timing art
+machinery in `mpris.rs`/`mixer.rs` with an event-driven media-session watcher
+and deterministic, URL-keyed art resolution.
 
 ## Why (verified facts this design rests on)
 
@@ -229,10 +237,11 @@ fn reconcile(
    behavior change. Soak on the real desktop; compare against the known
    failure cases (Shorts churn, Twitch mute/unmute restore, Kick flap).
 2. **Art switchover.** Icons come from identity lookup + `art_resolve`;
-   names/locks untouched. Delete the file-timing machinery (it has no other
-   consumer). Regression bar: Twitch in-browser mute/unmute still restores
-   its avatar; Kick avatar appears while `media.name` flaps; Shorts show the
-   right thumbnail per short.
+   names/locks untouched. Implemented as an additive post-pass (identity art
+   wins, legacy pipeline remains the fallback for unmatched channels); the
+   file-timing machinery deletion moves to phase 3. Regression bar: Twitch
+   in-browser mute/unmute still restores its avatar; Kick avatar appears
+   while `media.name` flaps; Shorts show the right thumbnail per short.
 3. **Identity switchover.** Names + collision recovery via `SESSIONS`;
    remove `ART_MEMORY` and `enrich_generic_names`; `locked` → `name_locked`.
 4. **Reconcile extraction + tests** for the whole matrix (new stream, lie,

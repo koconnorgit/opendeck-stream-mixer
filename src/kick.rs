@@ -164,7 +164,8 @@ fn fetch_avatar(slug: &str) -> Option<Vec<u8>> {
 
 /// HTTP GET via the `curl` binary (see module docs for why not a Rust client).
 /// `-f` makes curl fail (non-zero exit, empty stdout) on HTTP errors.
-fn curl_get(url: &str) -> Option<Vec<u8>> {
+/// Shared with `art_resolve` for the YouTube/Twitch art fetchers.
+pub(crate) fn curl_get(url: &str) -> Option<Vec<u8>> {
     let out = Command::new("curl")
         .args(["-fsSL", "--max-time", FETCH_TIMEOUT_SECS, "-A", UA, url])
         .output()
