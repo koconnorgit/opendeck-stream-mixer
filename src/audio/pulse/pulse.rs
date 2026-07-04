@@ -72,11 +72,22 @@ fn get_icon_search_name(app: &ApplicationInfo) -> String {
 /// keys and are left untouched. Streams without a PID can't be safely attributed
 /// to a process, so they pass through individually.
 ///
+/// Browser streams NEVER collapse: Firefox tags a recreated sink-input with the
+/// browser's *active* Media Session title, so two different tabs can transiently
+/// share one name — merging them hands both tabs to one encoder and the "other"
+/// tab vanishes from the deck (observed 2026-07-04 with a Twitch + Kick pair).
+/// The mixer's collision machinery re-identifies them instead.
+///
 /// The merged entry keeps the lowest member uid as its stable identity, reports
 /// the loudest member's volume, is muted only when every member is muted, and
 /// lists all member uids so volume/mute can be applied to the whole group.
 fn collapse_indistinct(streams: Vec<AppInfo>) -> Vec<AppInfo> {
-    let key_of = |s: &AppInfo| s.pid.map(|pid| (pid, s.app_name.to_lowercase()));
+    let key_of = |s: &AppInfo| {
+        if s.is_browser {
+            return None;
+        }
+        s.pid.map(|pid| (pid, s.app_name.to_lowercase()))
+    };
 
     let mut counts: HashMap<(u32, String), usize> = HashMap::new();
     for s in &streams {
@@ -387,6 +398,19 @@ mod tests {
             app(2, Some(9), "Game", 50.0, false),
         ]);
         assert!(!partial[0].mute, "unmuted when any member is unmuted");
+    }
+
+    #[test]
+    fn browser_streams_never_collapse_even_with_identical_names() {
+        // Firefox's media.name lie can give two different tabs the same name
+        // transiently; merging them hands both tabs to one encoder.
+        let mut a = app(1, Some(50), "Some Stream Title", 50.0, false);
+        let mut b = app(2, Some(50), "Some Stream Title", 50.0, true);
+        a.is_browser = true;
+        b.is_browser = true;
+        let out = collapse_indistinct(vec![a, b]);
+        assert_eq!(out.len(), 2, "browser tabs stay separate");
+        assert!(out.iter().all(|s| s.member_uids.len() == 1));
     }
 
     #[test]

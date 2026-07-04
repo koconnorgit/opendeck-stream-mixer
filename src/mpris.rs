@@ -274,12 +274,21 @@ pub async fn enrich_generic_names(apps: &mut [AppInfo]) {
                 continue;
             }
             if let Some(title) = mpris_title(&conn, name).await {
+                // Assign the RAW title, not the cleaned one: media.name will
+                // later publish the full form ("X Stream - Watch Live on Kick"),
+                // and a cleaned name here makes the same stream's two forms
+                // cleaned-collide — which flagged real Kick streams as
+                // mis-tagged and fed them to identity recovery (observed
+                // 2026-07-04). The raw form also lets `kick_slug` parse the
+                // slug, so enriched Kick streams get their avatar. Display
+                // trimming stays where it belongs (`display_label`).
+                let title = title.trim().to_string();
                 let cleaned = clean_stream_title(&title);
                 if !cleaned.is_empty()
                     && !is_generic_name(&cleaned)
-                    && !owned_names.contains(&(pid, cleaned.to_lowercase()))
+                    && !owned_names.contains(&(pid, title.to_lowercase()))
                 {
-                    app.app_name = cleaned;
+                    app.app_name = title;
                     break;
                 }
             }

@@ -198,6 +198,13 @@ fn apply_art(
     channel.mpris_art_path = Some(path);
 }
 
+/// The identity key a channel's synthetic `identity://` art path encodes, if
+/// that's what it is wearing.
+fn identity_of_path(path: Option<&PathBuf>) -> Option<&str> {
+    path.and_then(|p| p.to_str())
+        .and_then(|s| s.strip_prefix("identity://"))
+}
+
 /// Outcome of the identity-first art attempt (phase 2 of
 /// docs/mpris-subscription-design.md).
 enum IdentityArt {
@@ -228,15 +235,22 @@ fn try_identity_art(
     match crate::media_session::channel_art(pid, &channel.app_name) {
         crate::media_session::ChannelArt::Ready(key, bytes) => {
             let path = PathBuf::from(format!("identity://{key}"));
+            if claimed_paths.contains(&path) && channel.mpris_art_path.as_ref() != Some(&path) {
+                // A live sibling already wears this identity (two tabs, same
+                // content) — don't double-claim.
+                return IdentityArt::Unresolved;
+            }
+            // Canonicalize the display name: a recreated sink-input wears the
+            // active session's title (the stream subtitle on Twitch), and
+            // whatever name sticks here also becomes the ART_MEMORY identity
+            // that collision recovery later restores — it must be the real one.
+            if let Some(canon) = crate::media_session::display_name_for(pid, &key) {
+                channel.app_name = canon;
+            }
             if channel.mpris_art_path.as_ref() == Some(&path) {
                 // Already wearing this identity's art; keep the claim fresh.
                 claimed_paths.insert(path);
                 return IdentityArt::Applied;
-            }
-            if claimed_paths.contains(&path) {
-                // A live sibling already wears this identity (two tabs, same
-                // content) — don't double-claim.
-                return IdentityArt::Unresolved;
             }
             if let Some(old) = channel.mpris_art_path.take() {
                 claimed_paths.remove(&old);
@@ -507,9 +521,23 @@ pub async fn update_mixer_channels(
             // re-tagging this stream with the active session's title, not a real
             // content change — ignore it so a recovered identity (below) is not
             // re-corrupted on every refresh by the persistent wrong media.name.
+            // Likewise, a "shift" between two names of the SAME identity (the
+            // canonical "Nmplol - Twitch" this channel wears vs. the stream
+            // subtitle Firefox keeps reporting in media.name) is not a content
+            // change — dropping art and re-anchoring on it would churn every
+            // refresh.
+            let shifted_within_identity = app
+                .pid
+                .zip(identity_of_path(prev.mpris_art_path.as_ref()))
+                .map(|(pid, key)| {
+                    crate::media_session::match_identity(pid, &app.app_name).as_deref()
+                        == Some(key)
+                })
+                .unwrap_or(false);
             let name_shifted = !crate::mpris::is_generic_name(&app.app_name)
                 && app.app_name != prev.app_name
-                && !title_collides(app.pid, &app.app_name);
+                && !title_collides(app.pid, &app.app_name)
+                && !shifted_within_identity;
 
             if name_shifted {
                 prev.locked = false;
@@ -909,6 +937,15 @@ mod tests {
             None
         );
         forget(pid);
+    }
+
+    #[test]
+    fn identity_of_path_extracts_key_only_from_synthetic_paths() {
+        let synthetic = PathBuf::from("identity://ttv:nmplol");
+        assert_eq!(identity_of_path(Some(&synthetic)), Some("ttv:nmplol"));
+        let file = PathBuf::from("/run/firefox-mpris/1656_1.png");
+        assert_eq!(identity_of_path(Some(&file)), None);
+        assert_eq!(identity_of_path(None), None);
     }
 
     #[test]

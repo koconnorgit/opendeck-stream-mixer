@@ -236,6 +236,22 @@ pub fn match_identity(pid: u32, media_name: &str) -> Option<String> {
         .map(|((_, key), _)| key.clone())
 }
 
+/// Canonical display name for an identity, when the reported `media.name`
+/// shouldn't be trusted for display. Only Twitch needs this: a recreated
+/// sink-input wears the active Media Session title, which for Twitch is the
+/// *stream subtitle* (e.g. "😈 Anime Expo 😈 …") rather than the tab title
+/// ("Nmplol - Twitch"). Rebuilt from the session's `xesam:artist` (the
+/// channel's display name), falling back to the login. Kick and YouTube
+/// names are already correct (tab title / video title).
+pub fn display_name_for(pid: u32, key: &str) -> Option<String> {
+    let login = key.strip_prefix("ttv:")?;
+    let sessions = SESSIONS.lock().unwrap();
+    let artist = sessions
+        .get(&(pid, key.to_string()))
+        .and_then(|r| r.artist.clone());
+    Some(format!("{} - Twitch", artist.unwrap_or_else(|| login.to_string())))
+}
+
 /// Browser-published art captured for a learned session, if any.
 pub fn session_art(pid: u32, key: &str) -> Option<Arc<Vec<u8>>> {
     let sessions = SESSIONS.lock().unwrap();
@@ -700,6 +716,36 @@ mod tests {
             match_identity(pid, "Cool Video - YouTube").as_deref(),
             Some("yt:xyz789")
         );
+        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn canonical_twitch_display_name_from_artist() {
+        let pid = 910_004;
+        SESSIONS.lock().unwrap().insert(
+            (pid, "ttv:nmplol".into()),
+            SessionRecord {
+                identity: MediaIdentity::Twitch {
+                    login: "nmplol".into(),
+                },
+                title: "Some Stream Subtitle".into(),
+                artist: Some("Nmplol".into()),
+                art: None,
+                last_active: SystemTime::now(),
+                dormant_since: None,
+            },
+        );
+        assert_eq!(
+            display_name_for(pid, "ttv:nmplol").as_deref(),
+            Some("Nmplol - Twitch")
+        );
+        // No session record → login fallback; non-Twitch identities → None.
+        assert_eq!(
+            display_name_for(910_005, "ttv:somelogin").as_deref(),
+            Some("somelogin - Twitch")
+        );
+        assert_eq!(display_name_for(pid, "yt:abc123"), None);
+        assert_eq!(display_name_for(pid, "kick:xqc"), None);
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
