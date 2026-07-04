@@ -94,10 +94,6 @@ static DEPARTED_IDENTITIES: LazyLock<std::sync::Mutex<HashMap<(u32, String), Sys
 /// unrelated streams.
 const DEPARTED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// A departure this recent is "what just happened" — the mute the returning
-/// stream belongs to. Old departures (tab navigations minutes ago) linger in
-/// the table for the TTL and must not block adopting the obvious fresh one.
-const DEPARTED_FRESH: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One mute toggle spans TWO debounced refreshes (PulseAudio delivers the
 /// removal and the replacement as separate events ~100-600ms apart), so "the
@@ -230,20 +226,14 @@ fn recover_departed_identity(
         return Some(instant[0].0.clone());
     }
 
-    let fresh: Vec<&(&String, SystemTime)> = candidates
-        .iter()
-        .filter(|(_, at)| {
-            now.duration_since(*at)
-                .map(|age| age < DEPARTED_FRESH)
-                .unwrap_or(true)
-        })
-        .collect();
-
-    match (fresh.len(), candidates.len()) {
-        (1, _) => Some(fresh[0].0.clone()),
-        (0, 1) => Some(candidates[0].0.clone()),
-        _ => None,
+    // Otherwise only a SOLE candidate is safe. (A wider "uniquely fresh"
+    // window used to sit between these tiers, but with mutes paced seconds
+    // apart it handed a returning stream the OTHER stream's departure —
+    // the instant tier covers everything the fresh tier was for.)
+    if candidates.len() == 1 {
+        return Some(candidates[0].0.clone());
     }
+    None
 }
 
 /// How long a cross-identity name shift must persist, uncontested, before it
@@ -302,10 +292,18 @@ pub async fn create_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
 pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[String]) {
     let mut channels = MIXER_CHANNELS.lock().await;
 
-    let active_apps: Vec<_> = applications
+    let mut active_apps: Vec<_> = applications
         .into_iter()
         .filter(|app| !is_ignored(app, ignored_apps))
         .collect();
+    // Reconcile NEWEST streams first (sink-input indices are monotonic):
+    // recovery signals — a freshly-signaled session, a just-recorded departure
+    // — describe the most recently created stream. Letting an older stuck
+    // channel consume them mis-assigns: observed as a twitch channel adopting
+    // the fresh kick session the moment kick was unmuted, while the kick
+    // stream took the leftover twitch identity (a stable swap). Encoder slot
+    // positions are unaffected — they're rank-assigned after the loop.
+    active_apps.sort_by(|a, b| b.uid.cmp(&a.uid));
 
     // Positions channels held last refresh, by uid and by identity — a
     // recreated stream (new uid, same identity) keeps its LCD slot instead of
