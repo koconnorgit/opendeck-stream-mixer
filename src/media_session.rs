@@ -242,9 +242,18 @@ const RECOVERY_WINDOW: Duration = Duration::from_secs(15);
 ///    change — its record looks stale even though the browser is actively
 ///    reporting that content as playing (observed 2026-07-04: Twitch
 ///    mute/unmute never recovered while Kick always did).
-/// Never returns an identity another live stream already wears (`worn`);
-/// a stale non-active candidate is refused rather than guessed.
-pub fn recover_recent_identity(pid: u32, worn: &HashSet<String>, now: SystemTime) -> Option<String> {
+/// Never returns an identity another live stream already wears (`worn`).
+/// `ghostable` holds identities whose channels recently departed: a STALE
+/// candidate in that set is a likely ghost — a closed tab's session lingers
+/// looking "newest" but will never signal again — and is refused; a FRESH
+/// signal proves the tab is alive regardless. A stale non-active candidate is
+/// always refused rather than guessed.
+pub fn recover_recent_identity(
+    pid: u32,
+    worn: &HashSet<String>,
+    ghostable: &HashSet<String>,
+    now: SystemTime,
+) -> Option<String> {
     let sessions = SESSIONS.lock().unwrap();
     let newest_on_pid = sessions
         .iter()
@@ -255,12 +264,12 @@ pub fn recover_recent_identity(pid: u32, worn: &HashSet<String>, now: SystemTime
         .iter()
         .filter(|((p, key), _)| *p == pid && !worn.contains(key))
         .max_by_key(|(_, rec)| rec.last_active)
-        .filter(|(_, rec)| {
+        .filter(|((_, key), rec)| {
             let fresh = now
                 .duration_since(rec.last_active)
                 .map(|age| age < RECOVERY_WINDOW)
                 .unwrap_or(true);
-            fresh || rec.last_active >= newest_on_pid
+            fresh || (rec.last_active >= newest_on_pid && !ghostable.contains(key.as_str()))
         })
         .map(|((_, key), _)| key.clone())
 }
@@ -717,13 +726,13 @@ mod tests {
 
         // Freshest unworn session wins.
         assert_eq!(
-            recover_recent_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now).as_deref(),
             Some("ttv:fresh")
         );
         // A worn identity is never re-adopted; the stale one is neither fresh
         // nor the pid's newest session, so it's refused.
         let worn: HashSet<String> = [String::from("ttv:fresh")].into();
-        assert_eq!(recover_recent_identity(pid, &worn, now), None);
+        assert_eq!(recover_recent_identity(pid, &worn, &HashSet::new(), now), None);
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
@@ -748,12 +757,12 @@ mod tests {
         );
         let now = SystemTime::now();
         assert_eq!(
-            recover_recent_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now).as_deref(),
             Some("ttv:nmplol")
         );
         // But once a live stream wears it, it is never handed out again.
         let worn: HashSet<String> = [String::from("ttv:nmplol")].into();
-        assert_eq!(recover_recent_identity(pid, &worn, now), None);
+        assert_eq!(recover_recent_identity(pid, &worn, &HashSet::new(), now), None);
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 

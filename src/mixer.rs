@@ -99,6 +99,29 @@ const DEPARTED_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 /// the table for the TTL and must not block adopting the obvious fresh one.
 const DEPARTED_FRESH: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// One mute toggle spans TWO debounced refreshes (PulseAudio delivers the
+/// removal and the replacement as separate events ~100-600ms apart), so "the
+/// departure belonging to the stream being built right now" is anything this
+/// recent — not just this exact refresh.
+const DEPARTED_INSTANT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// TTL-valid departed identities on a PID — the session tiers treat these as
+/// potential ghosts (a closed tab's session lingers looking "newest").
+fn departed_keys_for(pid: u32, now: SystemTime) -> HashSet<String> {
+    let departed = DEPARTED_IDENTITIES.lock().unwrap();
+    departed
+        .iter()
+        .filter(|((p, _), at)| {
+            *p == pid
+                && now
+                    .duration_since(**at)
+                    .map(|age| age < DEPARTED_TTL)
+                    .unwrap_or(true)
+        })
+        .map(|((_, key), _)| key.clone())
+        .collect()
+}
+
 /// Adopt a recently-departed, unworn identity on this PID: the uniquely FRESH
 /// departure (the mute that just happened) wins even when stale departures
 /// pollute the table; otherwise a unique candidate overall. Two fresh
@@ -122,13 +145,18 @@ fn recover_departed_identity(
         .map(|((_, key), at)| (key, *at))
         .collect();
 
-    // A departure recorded in THIS refresh: Firefox destroys a muted stream
-    // and creates its replacement in one event batch, so the identity that
-    // died in the same pass almost certainly belongs to the stream being
-    // built right now. Outranks everything — including a ghost session from
-    // a just-closed tab that still looks "freshest" in the session table.
-    let instant: Vec<&(&String, SystemTime)> =
-        candidates.iter().filter(|(_, at)| *at == now).collect();
+    // A departure from the mute toggle happening right now (this refresh or
+    // the removal-refresh moments before it) almost certainly belongs to the
+    // stream being built. Outranks everything — including a ghost session
+    // from a just-closed tab that still looks "freshest" in the session table.
+    let instant: Vec<&(&String, SystemTime)> = candidates
+        .iter()
+        .filter(|(_, at)| {
+            now.duration_since(*at)
+                .map(|age| age < DEPARTED_INSTANT)
+                .unwrap_or(true)
+        })
+        .collect();
     if instant.len() == 1 {
         return Some(instant[0].0.clone());
     }
@@ -358,6 +386,32 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         }
     }
 
+    // Compact channel-state summary, printed only when identities/names
+    // change — the trace that makes mis-assignment reports diagnosable.
+    {
+        static LAST_SUMMARY: LazyLock<std::sync::Mutex<String>> =
+            LazyLock::new(|| std::sync::Mutex::new(String::new()));
+        let mut parts: Vec<String> = new_channels
+            .values()
+            .filter(|ch| !ch.is_device)
+            .map(|ch| {
+                format!(
+                    "uid={} {}={:?}",
+                    ch.uid,
+                    ch.identity.as_deref().unwrap_or("-"),
+                    ch.app_name
+                )
+            })
+            .collect();
+        parts.sort();
+        let summary = parts.join(" | ");
+        let mut last = LAST_SUMMARY.lock().unwrap();
+        if *last != summary {
+            println!("CHANNELS: {summary}");
+            *last = summary;
+        }
+    }
+
     *channels = new_channels;
 
     println!(
@@ -432,8 +486,14 @@ fn reconcile_existing(
             // Departures first: a session from a just-closed tab can still look
             // "freshest" (ghost), while a departure names a stream that really
             // vanished. Session tiers cover unmutes that re-signal.
-            recover_departed_identity(pid, recovery_worn, now)
-                .or_else(|| media_session::recover_recent_identity(pid, recovery_worn, now))
+            recover_departed_identity(pid, recovery_worn, now).or_else(|| {
+                media_session::recover_recent_identity(
+                    pid,
+                    recovery_worn,
+                    &departed_keys_for(pid, now),
+                    now,
+                )
+            })
         }) {
             // A returning stream is created ~100ms after the PulseAudio event,
             // but Firefox flips its active media session to the unmuted tab a
@@ -502,8 +562,14 @@ fn build_new(
         // just-closed tab can still look "freshest" (ghost). Session tiers
         // then cover unmutes that re-signal and the already-active-tab case.
         let recovered = app.pid.and_then(|pid| {
-            recover_departed_identity(pid, recovery_worn, now)
-                .or_else(|| media_session::recover_recent_identity(pid, recovery_worn, now))
+            recover_departed_identity(pid, recovery_worn, now).or_else(|| {
+                media_session::recover_recent_identity(
+                    pid,
+                    recovery_worn,
+                    &departed_keys_for(pid, now),
+                    now,
+                )
+            })
         });
         match recovered {
             Some(key) => {
