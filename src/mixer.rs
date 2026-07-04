@@ -120,9 +120,13 @@ static PENDING_CLAIMS: LazyLock<std::sync::Mutex<HashMap<(u32, String), PendingC
 /// A different name restarts the window; a claim nobody renews goes stale.
 fn deferred_claim_confirmed(pid: u32, key: &str, name: &str, now: SystemTime) -> bool {
     let mut claims = PENDING_CLAIMS.lock().unwrap();
+    // Age-based retention (NOT idle-based): refreshes are event-driven and a
+    // lone steady stream generates none, so an idle-dropped claim re-registered
+    // on each sparse event burst could never accumulate its 5s window — a
+    // recreated Twitch stream sat identity-less (no avatar) indefinitely.
     claims.retain(|_, c| {
-        now.duration_since(c.last)
-            .map(|idle| idle < SHIFT_CONFIRM.saturating_mul(2))
+        now.duration_since(c.first)
+            .map(|age| age < SHIFT_CONFIRM.saturating_mul(12))
             .unwrap_or(true)
     });
     match claims.entry((pid, key.to_string())) {
@@ -153,6 +157,19 @@ fn deferred_claim_confirmed(pid: u32, key: &str, name: &str, now: SystemTime) ->
             false
         }
     }
+}
+
+/// A pending claim only confirms during a refresh, and refreshes are
+/// event-driven — schedule one just past the confirmation window so a quiet
+/// system (one steady stream, no PulseAudio events) still confirms on time.
+fn schedule_claim_wakeup() {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    handle.spawn(async {
+        tokio::time::sleep(SHIFT_CONFIRM + std::time::Duration::from_millis(300)).await;
+        crate::audio::pulse::pulse_monitor::request_refresh();
+    });
 }
 
 /// Whether an identity departed recently (TTL-valid) on this PID.
@@ -599,6 +616,8 @@ fn reconcile_existing(
                     );
                     prev.identity = Some(key);
                     prev.app_name = raw.clone();
+                } else {
+                    schedule_claim_wakeup();
                 }
             } else {
                 prev.pending_name_shift = None;
@@ -760,6 +779,7 @@ fn build_new(
                     );
                     (Some(key), raw.clone())
                 } else {
+                    schedule_claim_wakeup();
                     (None, raw.clone())
                 }
             }
