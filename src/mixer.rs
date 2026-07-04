@@ -105,6 +105,21 @@ const DEPARTED_FRESH: std::time::Duration = std::time::Duration::from_secs(15);
 /// recent — not just this exact refresh.
 const DEPARTED_INSTANT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Whether an identity departed recently (TTL-valid) on this PID.
+fn identity_departed_recently(pid: Option<u32>, key: &str, now: SystemTime) -> bool {
+    let Some(pid) = pid else { return false };
+    DEPARTED_IDENTITIES
+        .lock()
+        .unwrap()
+        .get(&(pid, key.to_string()))
+        .map(|at| {
+            now.duration_since(*at)
+                .map(|age| age < DEPARTED_TTL)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
 /// TTL-valid departed identities on a PID — the session tiers treat these as
 /// potential ghosts (a closed tab's session lingers looking "newest").
 fn departed_keys_for(pid: u32, now: SystemTime) -> HashSet<String> {
@@ -473,10 +488,24 @@ fn reconcile_existing(
     // No identity yet.
     if let Some(key) = raw_identity {
         // The raw name now resolves (a Kick title landed, a session got
-        // learned). Adopt unless another live stream already maps to it.
+        // learned). Adopt unless another live stream already maps to it —
+        // and a JUST-DEPARTED identity only after the standard confirmation
+        // window (the name may be the lie wearing a muted tab's title).
         if identity_counts.get(&key).copied().unwrap_or(0) <= 1 {
-            prev.identity = Some(key);
-            prev.app_name = raw.clone();
+            if identity_departed_recently(app.pid, &key, now) {
+                if confirm_deferred_shift(&mut prev.pending_name_shift, raw, now, false) {
+                    println!(
+                        "Deferred adoption confirmed for uid={}: {}",
+                        prev.uid, key
+                    );
+                    prev.identity = Some(key);
+                    prev.app_name = raw.clone();
+                }
+            } else {
+                prev.pending_name_shift = None;
+                prev.identity = Some(key);
+                prev.app_name = raw.clone();
+            }
         }
     } else if crate::mpris::is_generic_name(&prev.app_name) {
         // Upgrade FROM generic only, and never to a colliding title.
@@ -555,7 +584,17 @@ fn build_new(
         || title_collides(app.pid, raw)
         || identity_taken;
 
-    let (identity, app_name) = if untrusted {
+    let mut pending_name_shift: Option<(String, SystemTime)> = None;
+    let (identity, app_name) = if untrusted && raw_identity.is_some() {
+        // The stream names a specific identity that another live stream holds
+        // (often its own dying husk from the same toggle). Recovering a
+        // DIFFERENT identity here would guess against the stream's own report
+        // — observed grafting kick:knut onto a stream reporting asmongold's
+        // title. Stay identity-less under the reported name; the wearer's
+        // death frees the identity within a refresh or two and the ordinary
+        // adoption path takes it.
+        (None, raw.clone())
+    } else if untrusted {
         // Departures first: the identity that died in this very refresh (a
         // mute's same-batch replacement) or a uniquely fresh/sole departure
         // names a stream that really vanished — while a session from a
@@ -595,7 +634,21 @@ fn build_new(
             }
         }
     } else {
-        (raw_identity, raw.clone())
+        match raw_identity {
+            // A trusted-looking name claiming a JUST-DEPARTED identity is
+            // ambiguous: it may be the muted tab genuinely returning, or the
+            // OTHER returning stream wearing that title (Firefox names new
+            // sink-inputs after the active session — this is how muting
+            // twitch+kick and unmuting in reverse order swapped both slots).
+            // Defer through the standard confirmation window: a genuine
+            // return keeps the title and confirms; the lie gets contested or
+            // renamed by later media.name updates.
+            Some(key) if identity_departed_recently(app.pid, &key, now) => {
+                confirm_deferred_shift(&mut pending_name_shift, raw, now, false);
+                (None, raw.clone())
+            }
+            other => (other, raw.clone()),
+        }
     };
 
     let (icon_uri, icon_uri_mute, uses_default_icon) = get_app_icon_uri(
@@ -624,7 +677,7 @@ fn build_new(
         uses_default_icon,
         identity,
         art_data: None,
-        pending_name_shift: None,
+        pending_name_shift,
         is_device: app.is_device,
         is_multi_sink_app: app.is_multi_sink_app,
     }
@@ -997,6 +1050,52 @@ mod tests {
             &HashMap::new(),
             SystemTime::now(),
         );
-        assert_ne!(out.identity.as_deref(), Some("ttv:nmplol"));
+        // Never a different identity either: adopting one would guess against
+        // the stream's own self-identification. It waits under its reported
+        // name for the wearer (usually its own dying husk) to free it.
+        assert_eq!(out.identity, None);
+        assert_eq!(out.app_name, "Nmplol - Twitch");
+    }
+
+    #[test]
+    fn raw_claim_of_recently_departed_identity_is_deferred() {
+        // Muting twitch+kick and unmuting in reverse order swapped slots: the
+        // returning stream wears the OTHER muted tab's title (nothing live
+        // contests it). A trusted-looking claim of a just-departed identity
+        // must ride the confirmation window instead of adopting instantly.
+        let pid = 920_020;
+        let now = SystemTime::now();
+        DEPARTED_IDENTITIES
+            .lock()
+            .unwrap()
+            .insert((pid, "kick:knut".into()), now - std::time::Duration::from_secs(30));
+        let mut a = app(5, Some(pid), "Knut Stream - Watch Live on Kick");
+        a.pid = Some(pid);
+        let out = build_new(
+            &a,
+            Some("kick:knut".into()),
+            &HashSet::new(),
+            &HashSet::new(),
+            &no_collision(),
+            &HashMap::new(),
+            now,
+        );
+        assert_eq!(out.identity, None, "not adopted instantly");
+        assert_eq!(out.app_name, "Knut Stream - Watch Live on Kick");
+        assert!(out.pending_name_shift.is_some(), "confirmation window armed");
+
+        // The window elapses uncontested → the existing-channel path confirms.
+        let later = now + SHIFT_CONFIRM;
+        let confirmed = reconcile_existing(
+            out,
+            &a,
+            Some("kick:knut".into()),
+            &no_collision(),
+            &HashMap::new(),
+            &HashSet::new(),
+            later,
+        );
+        assert_eq!(confirmed.identity.as_deref(), Some("kick:knut"));
+        DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 }
