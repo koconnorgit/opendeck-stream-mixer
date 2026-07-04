@@ -307,6 +307,17 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         .filter(|app| !is_ignored(app, ignored_apps))
         .collect();
 
+    // Positions channels held last refresh, by uid and by identity — a
+    // recreated stream (new uid, same identity) keeps its LCD slot instead of
+    // jumping to the end of the sink-input list, which read as two streams
+    // "swapping data" every mute/unmute.
+    let prev_rank_by_uid: HashMap<u32, u8> =
+        channels.iter().map(|(k, ch)| (ch.uid, *k)).collect();
+    let prev_rank_by_identity: HashMap<String, u8> = channels
+        .iter()
+        .filter_map(|(k, ch)| ch.identity.clone().map(|i| (i, *k)))
+        .collect();
+
     // Index previous channels by UID so identity, name, and art carry over.
     let mut previous_by_uid: HashMap<u32, MixerChannel> =
         channels.drain().map(|(_, ch)| (ch.uid, ch)).collect();
@@ -368,6 +379,13 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         .chain(identity_counts.keys().cloned())
         .collect();
 
+    // Identities worn by CHANNELS (surviving + adopted this pass). Unlike
+    // recovery_worn this excludes mere raw-name mappings, so a stream can
+    // still adopt its own reported identity — but never one another channel
+    // wears (two channels both wearing ttv:extraemily was observed when the
+    // adopt path only checked raw-name counts).
+    let mut channel_worn: HashSet<String> = prev_identities.clone();
+
     // Record departures BEFORE reconciling: Firefox replaces a muted stream's
     // sink-input with a silent "AudioStream" one in the SAME event batch, so
     // the replacement is processed in the same refresh its predecessor died —
@@ -389,8 +407,9 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         }
     }
 
-    let mut new_channels: HashMap<u8, MixerChannel> = HashMap::new();
-    let mut col_key: u8 = 0;
+    // Built channels in arrival order; slot positions are assigned after the
+    // loop, rank-stable against last refresh.
+    let mut built: Vec<MixerChannel> = Vec::new();
 
     for app in active_apps {
         let raw_identity = app
@@ -405,13 +424,14 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
                 &title_collides,
                 &identity_counts,
                 &recovery_worn,
+                &channel_worn,
                 now,
             ),
             None => build_new(
                 &app,
                 raw_identity,
                 &recovery_worn,
-                &prev_identities,
+                &channel_worn,
                 &title_collides,
                 &identity_counts,
                 now,
@@ -422,6 +442,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         // refresh can recover or adopt it too.
         if let Some(k) = &channel.identity {
             recovery_worn.insert(k.clone());
+            channel_worn.insert(k.clone());
         }
 
         // Live data always follows the stream.
@@ -440,9 +461,29 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
 
         resolve_channel_art(&mut channel, &app, &mut claimed);
 
-        new_channels.insert(col_key, channel);
-        col_key += 1;
+        built.push(channel);
     }
+
+    // Rank-stable slot assignment: a channel keeps its previous relative
+    // position (matched by uid, or by identity when the sink-input was
+    // recreated); genuinely new channels append in arrival order (the sort is
+    // stable, so equal ranks preserve it).
+    built.sort_by_key(|ch| {
+        prev_rank_by_uid
+            .get(&ch.uid)
+            .or_else(|| {
+                ch.identity
+                    .as_ref()
+                    .and_then(|k| prev_rank_by_identity.get(k))
+            })
+            .copied()
+            .unwrap_or(u8::MAX)
+    });
+    let new_channels: HashMap<u8, MixerChannel> = built
+        .into_iter()
+        .enumerate()
+        .map(|(i, ch)| (i as u8, ch))
+        .collect();
 
     // An identity a live channel wears is no longer "departed" — the stream
     // came back (or its identity was adopted by its replacement).
@@ -498,6 +539,7 @@ fn reconcile_existing(
     title_collides: &dyn Fn(Option<u32>, &str) -> bool,
     identity_counts: &HashMap<String, usize>,
     recovery_worn: &HashSet<String>,
+    channel_worn: &HashSet<String>,
     now: SystemTime,
 ) -> MixerChannel {
     let raw = &app.app_name;
@@ -542,10 +584,11 @@ fn reconcile_existing(
     // No identity yet.
     if let Some(key) = raw_identity {
         // The raw name now resolves (a Kick title landed, a session got
-        // learned). Adopt unless another live stream already maps to it —
-        // and a JUST-DEPARTED identity only after the standard confirmation
-        // window (the name may be the lie wearing a muted tab's title).
-        if identity_counts.get(&key).copied().unwrap_or(0) <= 1 {
+        // learned). Adopt unless another live stream already maps to it or a
+        // channel already wears it — and a JUST-DEPARTED identity only after
+        // the standard confirmation window (the name may be the lie wearing a
+        // muted tab's title).
+        if identity_counts.get(&key).copied().unwrap_or(0) <= 1 && !channel_worn.contains(&key) {
             if identity_departed_recently(app.pid, &key, now) {
                 if app
                     .pid
@@ -627,7 +670,7 @@ fn build_new(
     app: &AppInfo,
     raw_identity: Option<String>,
     recovery_worn: &HashSet<String>,
-    prev_identities: &HashSet<String>,
+    channel_worn: &HashSet<String>,
     title_collides: &dyn Fn(Option<u32>, &str) -> bool,
     identity_counts: &HashMap<String, usize>,
     now: SystemTime,
@@ -640,7 +683,7 @@ fn build_new(
     // rather than its own tab.
     let identity_taken = raw_identity
         .as_ref()
-        .map(|k| identity_counts.get(k).copied().unwrap_or(0) > 1 || prev_identities.contains(k))
+        .map(|k| identity_counts.get(k).copied().unwrap_or(0) > 1 || channel_worn.contains(k))
         .unwrap_or(false);
     let untrusted = crate::mpris::is_generic_name(raw)
         || title_collides(app.pid, raw)
@@ -948,6 +991,7 @@ mod tests {
             &no_collision(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.app_name, "Nmplol - Twitch");
@@ -964,6 +1008,7 @@ mod tests {
             Some("ttv:nmplol".into()),
             &no_collision(),
             &HashMap::new(),
+            &HashSet::new(),
             &HashSet::new(),
             SystemTime::now(),
         );
@@ -984,6 +1029,7 @@ mod tests {
             Some("ttv:nmplol".into()),
             &no_collision(),
             &counts,
+            &HashSet::new(),
             &HashSet::new(),
             SystemTime::now(),
         );
@@ -1074,6 +1120,7 @@ mod tests {
             &no_collision(),
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.identity.as_deref(), Some("kick:asmongold247"));
@@ -1101,6 +1148,7 @@ mod tests {
             &no_collision(),
             &HashMap::new(),
             &worn,
+            &HashSet::new(),
             SystemTime::now(),
         );
         assert_eq!(out.identity, None);
