@@ -287,14 +287,10 @@ pub async fn refresh_audio_applications() -> Result<(), Box<dyn std::error::Erro
     // module-stream-restore; unmute it so new tabs start audible.
     unmute_restored_browser_streams(&mut applications);
 
-    // Recover real names for streams whose media.name is generic (e.g. Kick.com).
-    crate::mpris::enrich_generic_names(&mut applications).await;
 
     // Attach real app icons from XWayland windows where available.
     crate::window_icons::enrich(&mut applications);
 
-    // Kick.com streams publish no media art; fetch the streamer avatar instead.
-    crate::kick::enrich_kick_art(&mut applications);
 
     // Get ignored apps list from shared settings
     let ignored_apps = {
@@ -334,8 +330,6 @@ mod tests {
             client_binary: None,
             wm_class: None,
             window_icon: None,
-            kick_art: None,
-            kick_pending: false,
         }
     }
 

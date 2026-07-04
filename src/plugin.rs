@@ -615,14 +615,10 @@ pub async fn init() -> OpenActionResult<()> {
         }
     };
 
-    // Recover real names for streams whose media.name is generic (e.g. Kick.com).
-    crate::mpris::enrich_generic_names(&mut applications).await;
 
     // Attach real app icons from XWayland windows where available.
     crate::window_icons::enrich(&mut applications);
 
-    // Kick.com streams publish no media art; fetch the streamer avatar instead.
-    crate::kick::enrich_kick_art(&mut applications);
 
     let ignored_apps = SHARED_SETTINGS.lock().await.ignored_apps_list.clone();
     mixer::create_mixer_channels(applications, &ignored_apps).await;

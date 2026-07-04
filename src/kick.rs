@@ -23,8 +23,6 @@ use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::audio::AppInfo;
-
 /// Browser-like UA so Cloudflare lets the request through.
 const UA: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 /// Per-request curl timeout (seconds, as the string curl wants).
@@ -91,33 +89,22 @@ pub fn display_name(app_name: &str) -> String {
     kick_handle(app_name).map_or_else(|| app_name.to_string(), |h| h.to_string())
 }
 
-/// For each Kick stream in `apps`, attach a ready avatar or mark it pending and
-/// kick off a background fetch. No-op for non-Kick streams. Cheap and synchronous
-/// (the network work happens on a spawned task), so it slots into the refresh
-/// pipeline next to `mpris::enrich_generic_names` and `window_icons::enrich`.
-pub fn enrich_kick_art(apps: &mut [AppInfo]) {
-    for app in apps.iter_mut() {
-        let Some(slug) = kick_slug(&app.app_name) else {
-            continue;
-        };
-
-        let mut cache = AVATARS.lock().unwrap();
-        match cache.get(&slug) {
-            Some(AvatarState::Ready(bytes)) => {
-                app.kick_art = Some(bytes.clone());
-            }
-            Some(AvatarState::Fetching) => {
-                app.kick_pending = true;
-            }
-            Some(AvatarState::Failed(at)) if at.elapsed() < FAILURE_BACKOFF => {
-                // Recently gave up; keep the default icon, don't hammer the API.
-            }
-            _ => {
-                // Never seen, or the failure backoff has expired → fetch it.
-                cache.insert(slug.clone(), AvatarState::Fetching);
-                app.kick_pending = true;
-                spawn_fetch(slug);
-            }
+/// Look up (or start fetching) a Kick streamer's avatar by slug, mirroring
+/// `art_resolve::resolve` (phase 3: the mixer asks per identity instead of an
+/// enrichment pass tagging AppInfo). Non-blocking: a cold slug kicks off a
+/// background fetch and reports `Pending`; the completed fetch queues a refresh.
+pub fn resolve_avatar(slug: &str) -> crate::art_resolve::ArtState {
+    use crate::art_resolve::ArtState;
+    let mut cache = AVATARS.lock().unwrap();
+    match cache.get(slug) {
+        Some(AvatarState::Ready(bytes)) => ArtState::Ready(std::sync::Arc::new(bytes.clone())),
+        Some(AvatarState::Fetching) => ArtState::Pending,
+        Some(AvatarState::Failed(at)) if at.elapsed() < FAILURE_BACKOFF => ArtState::Unavailable,
+        _ => {
+            // Never seen, or the failure backoff has expired → fetch it.
+            cache.insert(slug.to_string(), AvatarState::Fetching);
+            spawn_fetch(slug.to_string());
+            ArtState::Pending
         }
     }
 }
@@ -142,7 +129,7 @@ fn spawn_fetch(slug: String) {
             cache.insert(slug, state);
         }
 
-        crate::audio::pulse::pulse_monitor::refresh_guarded("kick avatar").await;
+        crate::audio::pulse::pulse_monitor::request_refresh();
     });
 }
 

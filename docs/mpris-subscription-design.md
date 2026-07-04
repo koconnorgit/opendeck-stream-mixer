@@ -1,19 +1,21 @@
 # Design: MPRIS subscription + URL-keyed identity/art
 
-Status: phase 2 (art switchover) live since 2026-07-04 — `media_session.rs`
-(watcher + identity matching), `art_resolve.rs` (yt/ttv fetchers), and the
-`try_identity_art` post-pass in `mixer.rs`. Grep the plugin log for
-`MPRIS-WATCH` / `SHADOW` / `ART-RESOLVE`. Phase-1 soak scored 2026-07-04:
-watcher flawless (0 errors, 22/25 art captures); it caught two matching bugs
-(uncleaned title join, kick.com/browse-as-channel), both fixed with tests.
-Twitch art: session art primary, decapi avatar fallback (preview CDN was
-shipped and rejected — never screenshots, see HARD RULE below). NOTE — phase 2
-was implemented additively: identity art is a post-pass that *overrides* the
-legacy pipeline, claimed under a synthetic `identity://<key>` path so the
-existing claim-exclusion + ART_MEMORY recovery plumbing keeps working; the
-file-timing machinery deletion moves to phase 3. Replaces the file-timing art
-machinery in `mpris.rs`/`mixer.rs` with an event-driven media-session watcher
-and deterministic, URL-keyed art resolution.
+Status: phase 3 (identity switchover + deletion) live since 2026-07-04.
+Identity from the session table is the single naming/art authority:
+`mixer.rs` reconciles via `match_identity` / `art_for_identity` /
+`recover_recent_identity` (freshest-active-session recovery replaces the
+ART_MEMORY 30s heuristic and works after mutes of any length). DELETED: the
+entire file-timing machinery (`claim_art`/`pick_art`/`first_seen`/`SETTLE`/
+PRE/POST windows/`claimed_paths`), `art_resolved`, `locked`, ART_MEMORY,
+`enrich_generic_names`, `enrich_kick_art` (now `kick::resolve_avatar` behind
+`art_for_identity`), and the phase-1 shadow tooling. Retained: the
+cross-identity shift deferral (`pending_name_shift`, 5s), title/identity
+collision counts, and the browser-collapse exclusion in pulse.rs. Twitch art:
+session art primary, decapi avatar fallback (preview CDN was shipped and
+rejected — never screenshots, see HARD RULE below). Phase-1 soak scored
+2026-07-04: watcher flawless (0 errors, 22/25 art captures). Remaining:
+phase 4 (pure `reconcile` extraction — `reconcile_existing`/`build_new` are
+already free-standing; the loop context still reads global SESSIONS).
 
 ## Why (verified facts this design rests on)
 

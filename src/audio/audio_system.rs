@@ -39,13 +39,6 @@ pub struct AppInfo {
     pub wm_class: Option<String>,
     /// Real icon pixels pulled from the matched window's `_NET_WM_ICON`.
     pub window_icon: Option<crate::window_icons::WindowIcon>,
-    /// Kick.com streamer avatar (PNG bytes), fetched from Kick's public API for
-    /// streams that don't publish Media Session art. Takes the same slot MPRIS
-    /// art would. See `crate::kick`.
-    pub kick_art: Option<Vec<u8>>,
-    /// True while this is a Kick stream still waiting on its avatar fetch, so the
-    /// channel stays unlocked until the avatar lands (or the fetch gives up).
-    pub kick_pending: bool,
 }
 
 pub trait AudioSystem {

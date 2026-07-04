@@ -209,8 +209,6 @@ impl AudioSystem for PulseAudioSystem {
                 client_binary: None,
                 wm_class: None,
                 window_icon: None,
-                kick_art: None,
-                kick_pending: false,
             });
         }
 
@@ -252,8 +250,6 @@ impl AudioSystem for PulseAudioSystem {
                 client_binary: client.and_then(|c| c.binary.clone()),
                 wm_class: None,
                 window_icon: None,
-                kick_art: None,
-                kick_pending: false,
             }
         }).collect();
 
@@ -363,8 +359,6 @@ mod tests {
             client_binary: None,
             wm_class: None,
             window_icon: None,
-            kick_art: None,
-            kick_pending: false,
         }
     }
 

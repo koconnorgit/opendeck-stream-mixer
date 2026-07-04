@@ -9,9 +9,9 @@
 //! steady-state reads — names the one art file Firefox keeps on disk, whose
 //! bytes must therefore be copied the moment the signal arrives.
 //!
-//! In this phase nothing consumes the table for rendering: `shadow_log` prints
-//! what identity/art *would* be chosen next to what the current pipeline chose,
-//! so the design can soak against real usage before any switchover.
+//! Since phase 3 this table is the single authority for browser-stream
+//! identity: the mixer resolves names, art, and lie-recovery through
+//! `match_identity` / `art_for_identity` / `recover_recent_identity`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -75,11 +75,6 @@ struct SessionRecord {
 
 /// (browser PID, identity key) → learned session.
 static SESSIONS: LazyLock<Mutex<HashMap<(u32, String), SessionRecord>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Last shadow decision logged per sink-input uid, so `shadow_log` only prints
-/// deltas and the soak log stays readable.
-static SHADOW_LAST: LazyLock<Mutex<HashMap<u32, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // ---------------------------------------------------------------------------
@@ -189,26 +184,6 @@ fn twitch_login_from_media_name(media_name: &str) -> Option<String> {
         .then_some(login)
 }
 
-/// The art the shadow pipeline would render for an identity.
-enum ShadowArt {
-    /// Browser-published art captured from the session table (bytes length).
-    Session(usize),
-    /// Would fetch from a deterministic source (label).
-    Fetch(&'static str),
-    /// No art source; themed-icon path.
-    None,
-}
-
-impl std::fmt::Display for ShadowArt {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ShadowArt::Session(len) => write!(f, "session({}KB)", len / 1024),
-            ShadowArt::Fetch(src) => write!(f, "fetch:{src}"),
-            ShadowArt::None => write!(f, "none"),
-        }
-    }
-}
-
 /// Match one sink-input to a learned identity, per the design's matching
 /// order: self-identifying `media.name` first (Twitch/Kick carry the channel
 /// in the name), then a boilerplate-cleaned title match against sessions
@@ -236,20 +211,46 @@ pub fn match_identity(pid: u32, media_name: &str) -> Option<String> {
         .map(|((_, key), _)| key.clone())
 }
 
-/// Canonical display name for an identity, when the reported `media.name`
-/// shouldn't be trusted for display. Only Twitch needs this: a recreated
-/// sink-input wears the active Media Session title, which for Twitch is the
-/// *stream subtitle* (e.g. "😈 Anime Expo 😈 …") rather than the tab title
-/// ("Nmplol - Twitch"). Rebuilt from the session's `xesam:artist` (the
-/// channel's display name), falling back to the login. Kick and YouTube
-/// names are already correct (tab title / video title).
+/// Canonical display name for an identity. Twitch is rebuilt from the
+/// session's `xesam:artist` (a recreated sink-input wears the active Media
+/// Session title, which for Twitch is the *stream subtitle* rather than the
+/// "Nmplol - Twitch" tab title); everything else uses the session's own title
+/// (tab title for Kick, video title for YouTube/Web).
 pub fn display_name_for(pid: u32, key: &str) -> Option<String> {
-    let login = key.strip_prefix("ttv:")?;
     let sessions = SESSIONS.lock().unwrap();
-    let artist = sessions
-        .get(&(pid, key.to_string()))
-        .and_then(|r| r.artist.clone());
-    Some(format!("{} - Twitch", artist.unwrap_or_else(|| login.to_string())))
+    let record = sessions.get(&(pid, key.to_string()));
+    if let Some(login) = key.strip_prefix("ttv:") {
+        let artist = record.and_then(|r| r.artist.clone());
+        return Some(format!("{} - Twitch", artist.unwrap_or_else(|| login.to_string())));
+    }
+    record.map(|r| r.title.clone())
+}
+
+/// How recently a session must have been the active one for
+/// `recover_recent_identity` to pin a just-created stream on it. Sink-input
+/// creation and the tab's Media Session activation happen within moments of
+/// each other (both are "this tab started playing").
+const RECOVERY_WINDOW: Duration = Duration::from_secs(15);
+
+/// Re-identify a stream whose `media.name` can't be trusted (generic, or
+/// wearing another live stream's title): the tab that just started playing is
+/// almost always the most-recently-active media session on that PID. Replaces
+/// the ART_MEMORY 30s-departed-identity heuristic — this works after a mute of
+/// any length, because unmuting re-activates the session *now*. Never returns
+/// an identity another live stream already wears (`worn`), and refuses to
+/// guess when no session is fresh enough.
+pub fn recover_recent_identity(pid: u32, worn: &HashSet<String>, now: SystemTime) -> Option<String> {
+    let sessions = SESSIONS.lock().unwrap();
+    sessions
+        .iter()
+        .filter(|((p, key), _)| *p == pid && !worn.contains(key))
+        .filter(|(_, rec)| {
+            now.duration_since(rec.last_active)
+                .map(|age| age < RECOVERY_WINDOW)
+                .unwrap_or(true)
+        })
+        .max_by_key(|(_, rec)| rec.last_active)
+        .map(|((_, key), _)| key.clone())
 }
 
 /// Browser-published art captured for a learned session, if any.
@@ -258,83 +259,33 @@ pub fn session_art(pid: u32, key: &str) -> Option<Arc<Vec<u8>>> {
     sessions.get(&(pid, key.to_string())).and_then(|r| r.art.clone())
 }
 
-/// The art decision for one sink-input (phase 2): session-captured art wins;
-/// YouTube/Twitch identities fall back to a deterministic fetch; Kick and
-/// generic identities without session art fall through to the legacy pipeline
-/// (the Kick avatar fetcher already covers `kick:`).
+/// The art decision for one identity.
 pub enum ChannelArt {
-    Ready(String, Arc<Vec<u8>>),
-    /// Identity known, fetch in flight — the caller should stay unlocked.
-    Pending(String),
+    Ready(Arc<Vec<u8>>),
+    /// Fetch in flight — a refresh is queued when it lands.
+    Pending,
     None,
 }
 
-pub fn channel_art(pid: u32, media_name: &str) -> ChannelArt {
-    let Some(key) = match_identity(pid, media_name) else {
-        return ChannelArt::None;
-    };
-    if let Some(bytes) = session_art(pid, &key) {
-        return ChannelArt::Ready(key, bytes);
+/// The art decision for a resolved identity key: session-captured art wins;
+/// YouTube/Twitch fall back to `art_resolve`'s fetchers, Kick to its avatar
+/// cache. `web:` identities have session art or nothing.
+pub fn art_for_identity(pid: u32, key: &str) -> ChannelArt {
+    if let Some(bytes) = session_art(pid, key) {
+        return ChannelArt::Ready(bytes);
     }
-    if key.starts_with("yt:") || key.starts_with("ttv:") {
-        return match crate::art_resolve::resolve(&key) {
-            crate::art_resolve::ArtState::Ready(bytes) => ChannelArt::Ready(key, bytes),
-            crate::art_resolve::ArtState::Pending => ChannelArt::Pending(key),
-            crate::art_resolve::ArtState::Unavailable => ChannelArt::None,
-        };
-    }
-    ChannelArt::None
-}
-
-/// Shadow view of the same decision, for the soak log.
-fn shadow_match(pid: u32, media_name: &str) -> Option<(String, ShadowArt)> {
-    let key = match_identity(pid, media_name)?;
-    let art = if let Some(bytes) = session_art(pid, &key) {
-        ShadowArt::Session(bytes.len())
-    } else if key.starts_with("yt:") {
-        ShadowArt::Fetch("yt-thumbnail")
-    } else if key.starts_with("ttv:") {
-        ShadowArt::Fetch("ttv-avatar")
-    } else if key.starts_with("kick:") {
-        ShadowArt::Fetch("kick-avatar-api")
+    let state = if key.starts_with("yt:") || key.starts_with("ttv:") {
+        crate::art_resolve::resolve(key)
+    } else if let Some(slug) = key.strip_prefix("kick:") {
+        crate::kick::resolve_avatar(slug)
     } else {
-        ShadowArt::None
+        crate::art_resolve::ArtState::Unavailable
     };
-    Some((key, art))
-}
-
-/// Phase-1 hook, called at the end of `mixer::update_mixer_channels`: log what
-/// the shadow pipeline would decide per channel, next to what the current
-/// pipeline chose. Prints only when a channel's decision changes. Observation
-/// only — no behavior depends on this.
-pub fn shadow_log(channels: &HashMap<u8, crate::mixer::MixerChannel>) {
-    let mut last = SHADOW_LAST.lock().unwrap();
-    let mut seen: HashSet<u32> = HashSet::new();
-    for ch in channels.values() {
-        if ch.is_device {
-            continue;
-        }
-        let Some(pid) = ch.pid else { continue };
-        seen.insert(ch.uid);
-
-        let would = match shadow_match(pid, &ch.app_name) {
-            Some((key, art)) => format!("{key} art={art}"),
-            None => "no-identity".to_string(),
-        };
-        let is = if ch.mpris_art_data.is_some() {
-            "art"
-        } else if !ch.uses_default_icon {
-            "themed"
-        } else {
-            "default"
-        };
-        let line = format!("would: {would} | is: {is}");
-        if last.get(&ch.uid) != Some(&line) {
-            println!("SHADOW uid={} {:?} → {}", ch.uid, ch.app_name, line);
-            last.insert(ch.uid, line);
-        }
+    match state {
+        crate::art_resolve::ArtState::Ready(bytes) => ChannelArt::Ready(bytes),
+        crate::art_resolve::ArtState::Pending => ChannelArt::Pending,
+        crate::art_resolve::ArtState::Unavailable => ChannelArt::None,
     }
-    last.retain(|uid, _| seen.contains(uid));
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn shadow_match_uses_learned_session_title() {
+    fn match_uses_learned_session_title_and_art() {
         let pid = 910_001; // private test PID, same convention as mixer tests
         SESSIONS.lock().unwrap().insert(
             (pid, "yt:abc123".into()),
@@ -688,9 +639,45 @@ mod tests {
                 dormant_since: None,
             },
         );
-        let m = shadow_match(pid, "Example Video Title");
-        assert_eq!(m.as_ref().map(|(k, _)| k.as_str()), Some("yt:abc123"));
-        assert!(matches!(m.unwrap().1, ShadowArt::Session(2048)));
+        assert_eq!(
+            match_identity(pid, "Example Video Title").as_deref(),
+            Some("yt:abc123")
+        );
+        assert_eq!(session_art(pid, "yt:abc123").map(|a| a.len()), Some(2048));
+        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn recovers_most_recent_unworn_session() {
+        let pid = 910_006;
+        let now = SystemTime::now();
+        let mut mk = |key: &str, title: &str, age_secs: u64| {
+            SESSIONS.lock().unwrap().insert(
+                (pid, key.to_string()),
+                SessionRecord {
+                    identity: MediaIdentity::Web {
+                        host: "x".into(),
+                        title: title.into(),
+                    },
+                    title: title.into(),
+                    artist: None,
+                    art: None,
+                    last_active: now - Duration::from_secs(age_secs),
+                    dormant_since: None,
+                },
+            );
+        };
+        mk("ttv:fresh", "Fresh", 2); // just became active (the unmuting tab)
+        mk("yt:stale", "Stale", 600); // an old Short, outside the window
+
+        // Freshest unworn session wins.
+        assert_eq!(
+            recover_recent_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("ttv:fresh")
+        );
+        // A worn identity is never re-adopted; the stale one is out of window.
+        let worn: HashSet<String> = [String::from("ttv:fresh")].into();
+        assert_eq!(recover_recent_identity(pid, &worn, now), None);
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
@@ -759,9 +746,10 @@ mod tests {
     }
 
     #[test]
-    fn shadow_match_twitch_without_session_falls_back_to_avatar_fetch() {
-        let m = shadow_match(910_002, "Nmplol - Twitch");
-        assert_eq!(m.as_ref().map(|(k, _)| k.as_str()), Some("ttv:nmplol"));
-        assert!(matches!(m.unwrap().1, ShadowArt::Fetch("ttv-avatar")));
+    fn twitch_media_name_matches_identity_without_a_session() {
+        assert_eq!(
+            match_identity(910_002, "Nmplol - Twitch").as_deref(),
+            Some("ttv:nmplol")
+        );
     }
 }
