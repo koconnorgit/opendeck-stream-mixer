@@ -596,6 +596,11 @@ pub async fn init() -> OpenActionResult<()> {
     // start listening to changes
     audio::pulse::start_pulse_monitoring();
 
+    // Shadow-mode media-session watcher (docs/mpris-subscription-design.md
+    // phase 1): learns identity/art from MPRIS signals and logs what it would
+    // decide; nothing rendered depends on it yet.
+    crate::media_session::start();
+
     // create initial map (ignored apps will be loaded via did_receive_global_settings).
     // If PulseAudio isn't ready yet, start empty and let the monitor populate us on
     // its first event rather than refusing to start the plugin at all.

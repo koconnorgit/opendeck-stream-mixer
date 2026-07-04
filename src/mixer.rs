@@ -706,6 +706,11 @@ pub async fn update_mixer_channels(
         }
     }
 
+    // Phase-1 shadow mode (docs/mpris-subscription-design.md): log what the
+    // media-session watcher would have decided next to what this pipeline
+    // chose. Observation only — no behavior depends on it.
+    crate::media_session::shadow_log(&new_channels);
+
     *channels = new_channels;
 
     println!(

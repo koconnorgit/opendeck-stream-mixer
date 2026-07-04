@@ -3,6 +3,7 @@ use openaction::OpenActionResult;
 mod audio;
 mod gfx;
 mod kick;
+mod media_session;
 mod mixer;
 mod mpris;
 mod plugin;
