@@ -63,10 +63,18 @@ impl MixerChannel {
     /// fetch and Kick detection key off it) but is too long/noisy to display.
     pub fn display_label(&self) -> String {
         if self.is_multi_sink_app {
-            self.sink_name.clone().unwrap_or_else(|| self.app_name.clone())
-        } else {
-            crate::kick::display_name(&self.app_name)
+            // Per-stream sink names disambiguate same-named app instances, but
+            // browser sink-inputs are all literally named "AudioStream" — a
+            // generic sink name is never a better label than the app name.
+            if let Some(sink) = self
+                .sink_name
+                .as_deref()
+                .filter(|s| !crate::mpris::is_generic_name(s))
+            {
+                return sink.to_string();
+            }
         }
+        crate::kick::display_name(&self.app_name)
     }
 }
 
@@ -737,8 +745,17 @@ pub async fn update_mixer_channels(
             }
 
             // Upgrade a generic name if a better one is now available, then lock.
+            // Strictly an upgrade FROM generic: a channel that already has a
+            // real name only changes it through the guarded name-shift above.
+            // (This block checks no collision/identity guards, and the raw
+            // media.name can be another tab's title — an unlocked channel
+            // adopting it here is how a Twitch slot once became a second Kick
+            // slot and both LCDs fell back to "AudioStream".)
             if !prev.locked {
-                if !crate::mpris::is_generic_name(&app.app_name) {
+                if crate::mpris::is_generic_name(&prev.app_name)
+                    && !crate::mpris::is_generic_name(&app.app_name)
+                    && !title_collides(app.pid, &app.app_name)
+                {
                     prev.app_name = app.app_name;
                 }
                 let has_good_name = !crate::mpris::is_generic_name(&prev.app_name);
@@ -1028,6 +1045,45 @@ mod tests {
             None
         );
         forget(pid);
+    }
+
+    fn bare_channel(app_name: &str, sink_name: Option<&str>, multi: bool) -> MixerChannel {
+        MixerChannel {
+            header_id: None,
+            upper_vol_btn_id: None,
+            lower_vol_btn_id: None,
+            dial_id: None,
+            uid: 1,
+            member_uids: vec![1],
+            pid: Some(1),
+            app_name: app_name.to_string(),
+            app_id: app_name.to_string(),
+            sink_name: sink_name.map(str::to_string),
+            mute: false,
+            vol_percent: 100.0,
+            icon_uri: String::new(),
+            icon_uri_mute: String::new(),
+            uses_default_icon: true,
+            mpris_art_data: None,
+            mpris_art_path: None,
+            locked: false,
+            first_seen: None,
+            art_resolved: false,
+            pending_name_shift: None,
+            is_device: false,
+            is_multi_sink_app: multi,
+        }
+    }
+
+    #[test]
+    fn multi_sink_label_never_falls_back_to_a_generic_sink_name() {
+        // Firefox sink-inputs are all named "AudioStream"; when two channels
+        // transiently share an app name, the label must not degrade to that.
+        let ch = bare_channel("Nmplol - Twitch", Some("AudioStream"), true);
+        assert_eq!(ch.display_label(), "Nmplol - Twitch");
+        // A real sink name still disambiguates same-named app instances.
+        let ch = bare_channel("Music App", Some("Headphones"), true);
+        assert_eq!(ch.display_label(), "Headphones");
     }
 
     #[test]
