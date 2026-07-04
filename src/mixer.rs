@@ -122,6 +122,17 @@ fn recover_departed_identity(
         .map(|((_, key), at)| (key, *at))
         .collect();
 
+    // A departure recorded in THIS refresh: Firefox destroys a muted stream
+    // and creates its replacement in one event batch, so the identity that
+    // died in the same pass almost certainly belongs to the stream being
+    // built right now. Outranks everything — including a ghost session from
+    // a just-closed tab that still looks "freshest" in the session table.
+    let instant: Vec<&(&String, SystemTime)> =
+        candidates.iter().filter(|(_, at)| *at == now).collect();
+    if instant.len() == 1 {
+        return Some(instant[0].0.clone());
+    }
+
     let fresh: Vec<&(&String, SystemTime)> = candidates
         .iter()
         .filter(|(_, at)| {
@@ -418,8 +429,11 @@ fn reconcile_existing(
         if !crate::mpris::is_generic_name(raw) && !title_collides(app.pid, raw) {
             prev.app_name = raw.clone();
         } else if let Some(key) = app.pid.and_then(|pid| {
-            media_session::recover_recent_identity(pid, recovery_worn, now)
-                .or_else(|| recover_departed_identity(pid, recovery_worn, now))
+            // Departures first: a session from a just-closed tab can still look
+            // "freshest" (ghost), while a departure names a stream that really
+            // vanished. Session tiers cover unmutes that re-signal.
+            recover_departed_identity(pid, recovery_worn, now)
+                .or_else(|| media_session::recover_recent_identity(pid, recovery_worn, now))
         }) {
             // A returning stream is created ~100ms after the PulseAudio event,
             // but Firefox flips its active media session to the unmuted tab a
@@ -482,13 +496,14 @@ fn build_new(
         || identity_taken;
 
     let (identity, app_name) = if untrusted {
-        // The tab that just started playing is almost always the freshest
-        // media session on this PID (an unmute re-activates it *now*); when it
-        // never re-signals (another tab holds the active session), the unique
-        // recently-departed identity is the fallback.
+        // Departures first: the identity that died in this very refresh (a
+        // mute's same-batch replacement) or a uniquely fresh/sole departure
+        // names a stream that really vanished — while a session from a
+        // just-closed tab can still look "freshest" (ghost). Session tiers
+        // then cover unmutes that re-signal and the already-active-tab case.
         let recovered = app.pid.and_then(|pid| {
-            media_session::recover_recent_identity(pid, recovery_worn, now)
-                .or_else(|| recover_departed_identity(pid, recovery_worn, now))
+            recover_departed_identity(pid, recovery_worn, now)
+                .or_else(|| media_session::recover_recent_identity(pid, recovery_worn, now))
         });
         match recovered {
             Some(key) => {
@@ -798,6 +813,19 @@ mod tests {
         // Worn → refused.
         let worn: HashSet<String> = [String::from("kick:b")].into();
         assert_eq!(recover_departed_identity(pid, &worn, now), None);
+        // A departure recorded THIS refresh outranks a merely-fresh one —
+        // the same-batch replacement case, even with a ghost around.
+        {
+            let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+            departed.insert((pid, "yt:ghost".into()), now - std::time::Duration::from_secs(5));
+        }
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("kick:b"),
+            "same-refresh departure beats a fresh ghost"
+        );
+        DEPARTED_IDENTITIES.lock().unwrap().remove(&(pid, "yt:ghost".to_string()));
+
         // Two FRESH departures (two tabs muted at once) → ambiguous, refused.
         DEPARTED_IDENTITIES
             .lock()
