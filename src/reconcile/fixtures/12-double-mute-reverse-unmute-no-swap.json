@@ -1,0 +1,33 @@
+{
+  "name": "12 two Kick tabs muted, unmuted in reverse: a session bumped BEFORE the last departure (Firefox flipping the active session on mute) is not evidence about a stream born after it (observed 2026-08-24: mizkif/asmongold swapped)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":5000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Mizkif Stream - Watch Live on Kick"},
+                  {"uid":11,"pid":1,"name":"asmongold Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:mizkif"}, {"uid":11,"identity":"kick:asmongold"} ] },
+    { "at_ms": 10000,
+      "apps":   [ {"uid":11,"pid":1,"name":"asmongold Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":11,"identity":"kick:asmongold"} ] },
+    { "at_ms": 13000,
+      "sessions": [
+        {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":12900},
+        {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":5000} ],
+      "apps": [], "expect": [] },
+    { "at_ms": 20000,
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":null} ],
+      "expect_poll": true },
+    { "at_ms": 21500,
+      "sessions": [
+        {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":12900},
+        {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":21500} ],
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":"kick:asmongold","name":"asmongold Stream - Watch Live on Kick"} ] },
+    { "at_ms": 30000,
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"}, {"uid":31,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":"kick:asmongold"}, {"uid":31,"identity":"kick:mizkif"} ] }
+  ]
+}

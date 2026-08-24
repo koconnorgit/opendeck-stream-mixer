@@ -271,6 +271,24 @@ fn resolve_icon_source(
 /// Get application icon as base64 data URIs.
 /// Resolves the best available source (MPRIS art, window icon, themed icon, or
 /// the bundled default) and returns (normal_uri, muted_uri, uses_default_icon).
+/// Wall-clock stamp for identity-trace log lines (`HH:MM:SS.mmm`, UTC), so
+/// the ordering of departures, session bumps and recoveries is recoverable
+/// from the plugin log when diagnosing a mis-assignment.
+pub fn log_ts(t: SystemTime) -> String {
+    let ms = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let s = ms / 1000;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        (s / 3600) % 24,
+        (s / 60) % 60,
+        s % 60,
+        ms % 1000
+    )
+}
+
 pub fn get_app_icon_uri(
     icon_name: Option<String>,
     fallback_icon_name: String,

@@ -51,7 +51,7 @@ pub(super) fn recover_untrusted(
             ctx.sessions.recover_recent_identity(
                 pid,
                 &ctx.recovery_worn,
-                &state.departed_keys_for(pid, now),
+                &state.departed_for(pid, now),
                 now,
             )
         });

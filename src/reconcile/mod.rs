@@ -154,9 +154,11 @@ impl IdentityState {
             .unwrap_or(false)
     }
 
-    /// TTL-valid departed identities on a PID — the session tiers treat these
-    /// as potential ghosts (a closed tab's session lingers looking "newest").
-    fn departed_keys_for(&self, pid: u32, now: SystemTime) -> HashSet<String> {
+    /// TTL-valid departed identities on a PID with their departure times —
+    /// the session tier treats these as potential ghosts (a closed tab's
+    /// session lingers looking "newest") and as the floor a fresh signal
+    /// must be newer than.
+    fn departed_for(&self, pid: u32, now: SystemTime) -> HashMap<String, SystemTime> {
         self.departed
             .iter()
             .filter(|((p, _), at)| {
@@ -166,7 +168,7 @@ impl IdentityState {
                         .map(|age| age < DEPARTED_TTL)
                         .unwrap_or(true)
             })
-            .map(|((_, key), _)| key.clone())
+            .map(|((_, key), at)| (key.clone(), *at))
             .collect()
     }
 
@@ -509,7 +511,7 @@ pub fn reconcile(state: &mut IdentityState, input: RefreshInput<'_>) -> Effects 
     parts.sort();
     let summary = parts.join(" | ");
     if state.last_summary != summary {
-        println!("CHANNELS: {summary}");
+        println!("[{}] CHANNELS: {summary}", crate::utils::log_ts(now));
         state.last_summary = summary;
     }
 

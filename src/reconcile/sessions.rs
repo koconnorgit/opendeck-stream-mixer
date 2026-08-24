@@ -6,7 +6,7 @@
 //! so the decision layer is a pure function of its inputs and tests build the
 //! rows they need instead of seeding a process-global table.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 /// One learned session, as the reconciler sees it (no art bytes — art is
@@ -108,19 +108,26 @@ impl SessionSnapshot {
     ///    actively reporting that content as playing (observed 2026-07-04:
     ///    Twitch mute/unmute never recovered while Kick always did).
     /// Never returns an identity another live stream already wears (`worn`).
-    /// `ghostable` holds identities whose channels recently departed: a STALE
-    /// candidate in that set is a likely ghost — a closed tab's session
-    /// lingers looking "newest" but will never signal again — and is refused;
-    /// a FRESH signal proves the tab is alive regardless. A stale non-active
-    /// candidate is always refused rather than guessed.
+    /// `departed` maps identities whose channels recently departed on this
+    /// PID to when they did. A STALE candidate in that set is a likely ghost
+    /// — a closed tab's session lingers looking "newest" but will never
+    /// signal again — and is refused. And NO record older than the latest
+    /// recent departure is ever adopted: a bump that predates that departure
+    /// happened before the unmute that created the stream being identified,
+    /// so it says nothing about that stream (observed 2026-08-24: two Kick
+    /// tabs muted then unmuted in reverse — Firefox bumped the first-muted
+    /// tab's session while the second was being muted, and the returning
+    /// second stream wore the first's identity; both slots swapped). A stale
+    /// non-active candidate is always refused rather than guessed.
     pub fn recover_recent_identity(
         &self,
         pid: u32,
         worn: &HashSet<String>,
-        ghostable: &HashSet<String>,
+        departed: &HashMap<String, SystemTime>,
         now: SystemTime,
     ) -> Option<String> {
         let newest_on_pid = self.on_pid(pid).map(|r| r.last_active).max()?;
+        let latest_departure = departed.values().max().copied();
         self.on_pid(pid)
             .filter(|r| !worn.contains(&r.key))
             .max_by_key(|r| r.last_active)
@@ -129,7 +136,11 @@ impl SessionSnapshot {
                     .duration_since(r.last_active)
                     .map(|age| age < RECOVERY_WINDOW)
                     .unwrap_or(true);
-                fresh || (r.last_active >= newest_on_pid && !ghostable.contains(r.key.as_str()))
+                let after_departures = latest_departure.map_or(true, |d| r.last_active > d);
+                after_departures
+                    && (fresh
+                        || (r.last_active >= newest_on_pid
+                            && !departed.contains_key(r.key.as_str())))
             })
             .map(|r| r.key.clone())
     }
@@ -234,7 +245,7 @@ mod tests {
 
         // Freshest unworn session wins.
         assert_eq!(
-            snap.recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now)
+            snap.recover_recent_identity(pid, &HashSet::new(), &HashMap::new(), now)
                 .as_deref(),
             Some("ttv:fresh")
         );
@@ -242,8 +253,25 @@ mod tests {
         // nor the pid's newest session, so it's refused.
         let worn: HashSet<String> = [String::from("ttv:fresh")].into();
         assert_eq!(
-            snap.recover_recent_identity(pid, &worn, &HashSet::new(), now),
+            snap.recover_recent_identity(pid, &worn, &HashMap::new(), now),
             None
+        );
+        // A fresh signal that PREDATES the latest departure on the PID is not
+        // about the stream being identified (it fired before the unmute).
+        let departed: HashMap<String, SystemTime> =
+            [(String::from("kick:other"), now - Duration::from_secs(1))].into();
+        assert_eq!(
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now),
+            None,
+            "a session bumped before the last departure never identifies a later stream"
+        );
+        // ...while one bumped after it does.
+        let departed: HashMap<String, SystemTime> =
+            [(String::from("kick:other"), now - Duration::from_secs(3))].into();
+        assert_eq!(
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now)
+                .as_deref(),
+            Some("ttv:fresh")
         );
     }
 
@@ -262,20 +290,21 @@ mod tests {
             last_active: now - Duration::from_secs(1200),
         }]);
         assert_eq!(
-            snap.recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now)
+            snap.recover_recent_identity(pid, &HashSet::new(), &HashMap::new(), now)
                 .as_deref(),
             Some("ttv:nmplol")
         );
         // But once a live stream wears it, it is never handed out again.
         let worn: HashSet<String> = [String::from("ttv:nmplol")].into();
         assert_eq!(
-            snap.recover_recent_identity(pid, &worn, &HashSet::new(), now),
+            snap.recover_recent_identity(pid, &worn, &HashMap::new(), now),
             None
         );
         // A stale newest session that recently DEPARTED is a ghost — refused.
-        let ghostable: HashSet<String> = [String::from("ttv:nmplol")].into();
+        let departed: HashMap<String, SystemTime> =
+            [(String::from("ttv:nmplol"), now - Duration::from_secs(60))].into();
         assert_eq!(
-            snap.recover_recent_identity(pid, &HashSet::new(), &ghostable, now),
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now),
             None
         );
     }

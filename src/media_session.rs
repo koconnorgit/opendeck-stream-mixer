@@ -578,6 +578,11 @@ fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
             rec.artist = fields.artist.or(rec.artist.take());
             rec.last_active = now;
             rec.dormant_since = None;
+            println!(
+                "[{}] MPRIS-WATCH session bumped: pid={pid} {key} playback={:?}",
+                crate::utils::log_ts(now),
+                fields.playback
+            );
             if art_grew {
                 println!(
                     "MPRIS-WATCH art captured: pid={pid} {key} ({}KB)",
@@ -587,7 +592,8 @@ fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
         }
         std::collections::hash_map::Entry::Vacant(e) => {
             println!(
-                "MPRIS-WATCH session learned: pid={pid} {key} title={:?} artist={:?} art={}",
+                "[{}] MPRIS-WATCH session learned: pid={pid} {key} title={:?} artist={:?} art={}",
+                crate::utils::log_ts(now),
                 title,
                 fields.artist,
                 art.as_ref().map(|a| format!("{}KB", a.len() / 1024)).unwrap_or("none".into()),
