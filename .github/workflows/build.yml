@@ -44,6 +44,12 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpulse-dev
 
+      - name: Run tests
+        # Native runner only — the aarch64 job cross-compiles and can't run
+        # the binary. Includes the reconciler's scenario-replay fixtures.
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --release --target ${{ matrix.target }}
+
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
 

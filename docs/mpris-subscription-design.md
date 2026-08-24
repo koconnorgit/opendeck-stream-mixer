@@ -13,9 +13,34 @@ cross-identity shift deferral (`pending_name_shift`, 5s), title/identity
 collision counts, and the browser-collapse exclusion in pulse.rs. Twitch art:
 session art primary, decapi avatar fallback (preview CDN was shipped and
 rejected — never screenshots, see HARD RULE below). Phase-1 soak scored
-2026-07-04: watcher flawless (0 errors, 22/25 art captures). Remaining:
-phase 4 (pure `reconcile` extraction — `reconcile_existing`/`build_new` are
-already free-standing; the loop context still reads global SESSIONS).
+2026-07-04: watcher flawless (0 errors, 22/25 art captures).
+
+Phase 4 (2026-08-24, v1.7.0): the reconciler is a pure core in
+`src/reconcile/`. `reconcile(&mut IdentityState, RefreshInput) -> Effects`
+reads the previous channels, the PulseAudio snapshot and a per-refresh
+`SessionSnapshot` (cloned from the watcher's table via
+`media_session::snapshot`), and returns the new channels plus the effects
+the shell must perform (`wake_after` for a claim's confirming refresh,
+`poll_players` for a direct player read). No statics, no spawning, no I/O;
+`mixer::update_mixer_channels` is the impure shell (snapshot → reconcile →
+art/icon pass → publish → effects). Every identity rule lives once in
+`reconcile/resolve.rs` (`recover_untrusted`, `claim_reported`).
+
+**Rule for identity bugs from here on: write the fixture first.**
+`src/reconcile/fixtures/*.json` replay recorded refresh sequences through
+the core (`reconcile/replay.rs` documents the format); each file is one
+field incident with the `CHANNELS:` outcome the deck must show at every
+step. Reproduce the report as a fixture (from the plugin log's `CHANNELS:` /
+`MPRIS-WATCH` lines and `pactl list sink-inputs`), watch it fail, then change
+the rule. `cargo test` runs them, and CI runs `cargo test` on the x86_64
+job before building.
+
+Known gap left as-is by phase 4 (behavior-preserving): when a mute's removal
+and its replacement land in SEPARATE refreshes and an older channel is
+already stuck generic, that channel takes the sole instant departure in the
+removal refresh (fixture 04 models the same-refresh case the newest-first
+rule fixed; the split-refresh case would need the departure to prefer a
+stream born after it).
 
 ## Why (verified facts this design rests on)
 
