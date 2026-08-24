@@ -9,10 +9,12 @@
 //! happen afterwards in `mixer::update_mixer_channels`. The replay tests in
 //! `replay.rs` drive it with recorded scenarios.
 
+mod resolve;
 pub mod sessions;
 
 use crate::audio::audio_system::AppInfo;
 use crate::mixer::MixerChannel;
+use resolve::{claim_reported, recover_untrusted, Resolution};
 use sessions::SessionSnapshot;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
@@ -572,65 +574,44 @@ fn reconcile_existing(
         // the standard confirmation window (the name may be the lie wearing a
         // muted tab's title).
         if ctx.identity_count(&key) <= 1 && !ctx.channel_worn.contains(&key) {
-            if state.identity_departed_recently(app.pid, &key, now) {
-                if app
-                    .pid
-                    .map(|pid| state.deferred_claim_confirmed(pid, &key, raw, now))
-                    .unwrap_or(false)
-                {
-                    println!("Deferred adoption confirmed for uid={}: {}", prev.uid, key);
+            match claim_reported(app.pid, key, raw, ctx, state) {
+                Resolution::Adopt { key, name } => {
+                    prev.pending_name_shift = None;
                     prev.identity = Some(key);
-                    prev.app_name = raw.clone();
-                } else {
-                    fx.request_wakeup();
+                    prev.app_name = name;
                 }
-            } else {
-                prev.pending_name_shift = None;
-                prev.identity = Some(key);
-                prev.app_name = raw.clone();
+                Resolution::Defer => fx.request_wakeup(),
+                Resolution::Refuse => {}
             }
         }
     } else if crate::mpris::is_generic_name(&prev.app_name) {
         // Upgrade FROM generic only, and never to a colliding title.
         if !crate::mpris::is_generic_name(raw) && !ctx.title_collides(app.pid, raw) {
             prev.app_name = raw.clone();
-        } else if let Some(key) = app.pid.and_then(|pid| {
-            // Departures first: a session from a just-closed tab can still
-            // look "freshest" (ghost), while a departure names a stream that
-            // really vanished. Session tiers cover unmutes that re-signal.
-            state
-                .recover_departed_identity(pid, &ctx.recovery_worn, ctx.sessions, now)
-                .or_else(|| {
-                    ctx.sessions.recover_recent_identity(
-                        pid,
-                        &ctx.recovery_worn,
-                        &state.departed_keys_for(pid, now),
-                        now,
-                    )
-                })
-        }) {
+        } else {
             // A returning stream is created ~100ms after the PulseAudio
             // event, but Firefox flips its active media session to the
             // unmuted tab a beat later — so creation-time recovery races the
             // session signal and can lose. A still-generic channel must keep
             // retrying on later refreshes (the watcher queues one when the
             // session lands), or "AudioStream" sticks forever.
-            let name = app
-                .pid
-                .and_then(|pid| ctx.sessions.display_name_for(pid, &key))
-                .unwrap_or_else(|| prev.app_name.clone());
-            println!(
-                "Recovered identity {:?} ({}) for generic stream uid={}",
-                name, key, prev.uid
-            );
-            prev.identity = Some(key);
-            prev.app_name = name;
-        } else {
-            println!(
-                "No identity for generic stream uid={} (worn: {:?})",
-                prev.uid, ctx.recovery_worn
-            );
-            fx.poll_players = true;
+            match recover_untrusted(app.pid, &prev.app_name, ctx, state) {
+                Resolution::Adopt { key, name } => {
+                    println!(
+                        "Recovered identity {:?} ({}) for generic stream uid={}",
+                        name, key, prev.uid
+                    );
+                    prev.identity = Some(key);
+                    prev.app_name = name;
+                }
+                Resolution::Defer | Resolution::Refuse => {
+                    println!(
+                        "No identity for generic stream uid={} (worn: {:?})",
+                        prev.uid, ctx.recovery_worn
+                    );
+                    fx.poll_players = true;
+                }
+            }
         }
     } else if raw != &prev.app_name
         && !crate::mpris::is_generic_name(raw)
@@ -656,7 +637,6 @@ fn build_new(
     fx: &mut Effects,
 ) -> MixerChannel {
     let raw = &app.app_name;
-    let now = ctx.now;
 
     // A new sink-input's name is untrusted when it is generic, duplicates a
     // live sibling's title, or maps to an identity another stream already
@@ -680,29 +660,8 @@ fn build_new(
         // ordinary adoption path takes it.
         (None, raw.clone())
     } else if untrusted {
-        // Departures first: the identity that died in this very refresh (a
-        // mute's same-batch replacement) or a uniquely fresh/sole departure
-        // names a stream that really vanished — while a session from a
-        // just-closed tab can still look "freshest" (ghost). Session tiers
-        // then cover unmutes that re-signal and the already-active-tab case.
-        let recovered = app.pid.and_then(|pid| {
-            state
-                .recover_departed_identity(pid, &ctx.recovery_worn, ctx.sessions, now)
-                .or_else(|| {
-                    ctx.sessions.recover_recent_identity(
-                        pid,
-                        &ctx.recovery_worn,
-                        &state.departed_keys_for(pid, now),
-                        now,
-                    )
-                })
-        });
-        match recovered {
-            Some(key) => {
-                let name = app
-                    .pid
-                    .and_then(|pid| ctx.sessions.display_name_for(pid, &key))
-                    .unwrap_or_else(|| raw.clone());
+        match recover_untrusted(app.pid, raw, ctx, state) {
+            Resolution::Adopt { key, name } => {
                 println!(
                     "Recovered identity {:?} ({}) for new stream uid={} (reported {:?})",
                     name, key, app.uid, raw
@@ -712,7 +671,7 @@ fn build_new(
             // No trustworthy identity: keep the reported name (the label may
             // be transiently wrong; the multi-sink label guard and later
             // media.name updates keep it presentable).
-            None => {
+            Resolution::Defer | Resolution::Refuse => {
                 println!(
                     "No identity for new stream uid={} (reported {:?}, worn: {:?})",
                     app.uid, raw, ctx.recovery_worn
@@ -723,31 +682,15 @@ fn build_new(
         }
     } else {
         match raw_identity {
-            // A trusted-looking name claiming a JUST-DEPARTED identity is
-            // ambiguous: it may be the muted tab genuinely returning, or the
-            // OTHER returning stream wearing that title (Firefox names new
-            // sink-inputs after the active session — this is how muting
-            // twitch+kick and unmuting in reverse order swapped both slots).
-            // Defer through the global claim window (survives the stream's
-            // own uid churn): a genuine return keeps the title and confirms;
-            // the lie gets renamed by later media.name updates and resets it.
-            Some(key) if state.identity_departed_recently(app.pid, &key, now) => {
-                if app
-                    .pid
-                    .map(|pid| state.deferred_claim_confirmed(pid, &key, raw, now))
-                    .unwrap_or(false)
-                {
-                    println!(
-                        "Deferred adoption confirmed for new stream uid={}: {}",
-                        app.uid, key
-                    );
-                    (Some(key), raw.clone())
-                } else {
+            Some(key) => match claim_reported(app.pid, key, raw, ctx, state) {
+                Resolution::Adopt { key, name } => (Some(key), name),
+                Resolution::Defer => {
                     fx.request_wakeup();
                     (None, raw.clone())
                 }
-            }
-            other => (other, raw.clone()),
+                Resolution::Refuse => (None, raw.clone()),
+            },
+            None => (None, raw.clone()),
         }
     };
 
