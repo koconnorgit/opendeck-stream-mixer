@@ -14,6 +14,7 @@
 //! degrades to a transient generic label that keeps retrying every refresh.
 
 use super::{Ctx, IdentityState};
+use std::time::SystemTime;
 
 /// What the evidence supports.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,12 +49,14 @@ pub(super) fn recover_untrusted(
     let recovered = state
         .recover_departed_identity(pid, &ctx.recovery_worn, ctx.sessions, now)
         .or_else(|| {
-            ctx.sessions.recover_recent_identity(
-                pid,
-                &ctx.recovery_worn,
-                &state.departed_for(pid, now),
-                now,
-            )
+            // Only departures nobody wears count as unclaimed.
+            let unclaimed: std::collections::HashMap<String, SystemTime> = state
+                .departed_for(pid, now)
+                .into_iter()
+                .filter(|(k, _)| !ctx.recovery_worn.contains(k))
+                .collect();
+            ctx.sessions
+                .recover_recent_identity(pid, &ctx.recovery_worn, &unclaimed, now)
         });
     match recovered {
         Some(key) => {

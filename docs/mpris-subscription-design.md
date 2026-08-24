@@ -35,6 +35,20 @@ step. Reproduce the report as a fixture (from the plugin log's `CHANNELS:` /
 the rule. `cargo test` runs them, and CI runs `cargo test` on the x86_64
 job before building.
 
+**Firefox MPRIS fact (slow run 2026-08-24 21:20, fixture 13):** the
+`PropertiesChanged` bump Firefox emits after a tab unmutes carries the
+metadata of its MAIN media controller — the last tab that pressed play — not
+the tab that just became audible (asmongold unmuted, mizkif's metadata emitted
+100ms later, every run). Consequences, now encoded in
+`SessionSnapshot::recover_recent_identity`: a session record older than the
+latest departure on the PID is never adopted, and a departed candidate is
+never adopted while another unclaimed departure exists. So after two tabs of
+one browser are muted in-page and unmuted, BOTH channels stay generic
+("AudioStream") until the departures expire (`DEPARTED_TTL`, 10 min) — there
+is no observable signal that says which stream is which, and a wrong guess
+would be permanent (fixtures 03, 07, 12, 13). Deck/dial mutes are PA-level,
+keep the sink-input alive, and have none of this.
+
 Known gap left as-is by phase 4 (behavior-preserving): when a mute's removal
 and its replacement land in SEPARATE refreshes and an older channel is
 already stuck generic, that channel takes the sole instant departure in the

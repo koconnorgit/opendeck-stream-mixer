@@ -25,9 +25,9 @@
         {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":12900},
         {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":21500} ],
       "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"} ],
-      "expect": [ {"uid":30,"identity":"kick:asmongold","name":"asmongold Stream - Watch Live on Kick"} ] },
+      "expect": [ {"uid":30,"identity":null} ] },
     { "at_ms": 30000,
       "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"}, {"uid":31,"pid":1,"name":"AudioStream"} ],
-      "expect": [ {"uid":30,"identity":"kick:asmongold"}, {"uid":31,"identity":"kick:mizkif"} ] }
+      "expect": [ {"uid":30,"identity":null}, {"uid":31,"identity":null} ] }
   ]
 }

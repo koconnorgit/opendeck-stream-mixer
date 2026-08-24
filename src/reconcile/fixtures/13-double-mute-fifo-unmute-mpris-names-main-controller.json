@@ -1,0 +1,28 @@
+{
+  "name": "13 two Kick tabs muted then unmuted in the SAME order (slow run 2026-08-24 21:20): Firefox's MPRIS bump after an unmute names its main controller (the last tab to press play), not the tab that unmuted; with two unclaimed departures nothing attributes either stream, so both must stay generic rather than swap",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":3000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"asmongold Stream - Watch Live on Kick"},
+                  {"uid":11,"pid":1,"name":"Mizkif Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:asmongold"}, {"uid":11,"identity":"kick:mizkif"} ] },
+    { "at_ms": 29500,
+      "apps":   [ {"uid":11,"pid":1,"name":"Mizkif Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":11,"identity":"kick:mizkif"} ] },
+    { "at_ms": 35000, "apps": [], "expect": [] },
+    { "at_ms": 40250,
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":null} ] },
+    { "at_ms": 40460,
+      "sessions": [
+        {"pid":1,"key":"kick:asmongold","title":"asmongold Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:mizkif","title":"Mizkif Stream - Watch Live on Kick","active_ms":40360} ],
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":null} ] },
+    { "at_ms": 45830,
+      "apps":   [ {"uid":30,"pid":1,"name":"AudioStream"}, {"uid":31,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":30,"identity":null}, {"uid":31,"identity":null} ] }
+  ]
+}

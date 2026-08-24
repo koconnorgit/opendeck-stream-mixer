@@ -1,5 +1,5 @@
 {
-  "name": "03 two Kick tabs muted together and returning together never both take one identity; ambiguity stays generic until a session signal (96c8667)",
+  "name": "03 two Kick tabs muted together and returning together never both take one identity; with two unclaimed departures a session bump is not attributable (it names Firefox's main controller), so both stay generic (96c8667, revised 2026-08-24)",
   "steps": [
     { "at_ms": 0,
       "sessions": [
@@ -18,6 +18,6 @@
         {"pid":1,"key":"kick:aaa","title":"Aaa Stream - Watch Live on Kick","active_ms":0},
         {"pid":1,"key":"kick:bbb","title":"Bbb Stream - Watch Live on Kick","active_ms":61000} ],
       "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"}, {"uid":13,"pid":1,"name":"AudioStream"} ],
-      "expect": [ {"uid":13,"identity":"kick:bbb"}, {"uid":12,"identity":"kick:aaa"} ] }
+      "expect": [ {"uid":13,"identity":null}, {"uid":12,"identity":null} ] }
   ]
 }

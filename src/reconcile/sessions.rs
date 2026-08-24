@@ -119,6 +119,14 @@ impl SessionSnapshot {
     /// tab's session while the second was being muted, and the returning
     /// second stream wore the first's identity; both slots swapped). A stale
     /// non-active candidate is always refused rather than guessed.
+    ///
+    /// And a DEPARTED candidate is never chosen while another unclaimed
+    /// departure exists on the PID: Firefox's MPRIS bump after an unmute
+    /// re-emits its MAIN media controller (the last tab that pressed play),
+    /// not the tab that just became audible (slow run 2026-08-24 21:20 —
+    /// asmongold unmuted first, Firefox emitted mizkif's metadata 100ms
+    /// later, every time). With two muted tabs no observable signal says
+    /// which one returned, so the honest answer is generic for both.
     pub fn recover_recent_identity(
         &self,
         pid: u32,
@@ -137,7 +145,9 @@ impl SessionSnapshot {
                     .map(|age| age < RECOVERY_WINDOW)
                     .unwrap_or(true);
                 let after_departures = latest_departure.map_or(true, |d| r.last_active > d);
+                let attributable = !departed.contains_key(r.key.as_str()) || departed.len() < 2;
                 after_departures
+                    && attributable
                     && (fresh
                         || (r.last_active >= newest_on_pid
                             && !departed.contains_key(r.key.as_str())))
