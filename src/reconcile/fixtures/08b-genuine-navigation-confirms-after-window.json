@@ -1,0 +1,18 @@
+{
+  "name": "08b a genuine same-tab navigation: the uncontested cross-identity shift commits after SHIFT_CONFIRM",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"ttv:nmplol","title":"nmplol live","artist":"Nmplol","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Nmplol - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol"} ] },
+    { "at_ms": 20000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Ludwig - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol","name":"Nmplol - Twitch"} ] },
+    { "at_ms": 23000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Ludwig - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol"} ] },
+    { "at_ms": 25100,
+      "apps":   [ {"uid":10,"pid":1,"name":"Ludwig - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:ludwig"} ] }
+  ]
+}

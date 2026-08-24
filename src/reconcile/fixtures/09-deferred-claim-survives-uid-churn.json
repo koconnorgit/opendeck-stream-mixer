@@ -1,0 +1,22 @@
+{
+  "name": "09 a trusted-looking claim of a just-departed identity rides the global claim window across sink-input generations (8f3050c, e26a10e)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"kick:knut","title":"Knut Stream - Watch Live on Kick","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:knut"} ] },
+    { "at_ms": 10000, "apps": [], "expect": [] },
+    { "at_ms": 40000,
+      "apps":   [ {"uid":11,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":11,"identity":null,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect_wakeup": true },
+    { "at_ms": 42000,
+      "apps":   [ {"uid":12,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":12,"identity":null} ],
+      "expect_wakeup": true },
+    { "at_ms": 45500,
+      "apps":   [ {"uid":13,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":13,"identity":"kick:knut"} ],
+      "expect_wakeup": false }
+  ]
+}

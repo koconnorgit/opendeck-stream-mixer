@@ -1,0 +1,16 @@
+{
+  "name": "06 navigating a tab to another streamer: the instant departure is refused because the session table names newer, unworn content (2026-08-24)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"ttv:sodapoppin","title":"soda live","artist":"sodapoppin","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"sodapoppin - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:sodapoppin"} ] },
+    { "at_ms": 50000, "apps": [], "expect": [] },
+    { "at_ms": 50500,
+      "sessions": [
+        {"pid":1,"key":"ttv:sodapoppin","title":"soda live","artist":"sodapoppin","active_ms":0},
+        {"pid":1,"key":"ttv:grandpoobear","title":"poo live","artist":"GrandPOOBear","active_ms":50200} ],
+      "apps":   [ {"uid":11,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":11,"identity":"ttv:grandpoobear","name":"GrandPOOBear - Twitch"} ] }
+  ]
+}

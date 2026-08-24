@@ -1,0 +1,24 @@
+{
+  "name": "07 two identities depart seconds apart, one stream returns: recency alone must not decide (showed Ludwig for a sodapoppin stream for hours) (7db05ee)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"ttv:ludwig","title":"ludwig live","artist":"Ludwig","active_ms":0},
+        {"pid":1,"key":"ttv:sodapoppin","title":"soda live","artist":"sodapoppin","active_ms":30000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Ludwig - Twitch"}, {"uid":11,"pid":1,"name":"sodapoppin - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:ludwig"}, {"uid":11,"identity":"ttv:sodapoppin"} ] },
+    { "at_ms": 100000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Ludwig - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:ludwig"} ] },
+    { "at_ms": 105000, "apps": [], "expect": [] },
+    { "at_ms": 105500,
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":null} ] },
+    { "at_ms": 106000,
+      "sessions": [
+        {"pid":1,"key":"ttv:ludwig","title":"ludwig live","artist":"Ludwig","active_ms":0},
+        {"pid":1,"key":"ttv:sodapoppin","title":"soda live","artist":"sodapoppin","active_ms":106000} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:sodapoppin","name":"sodapoppin - Twitch"} ] }
+  ]
+}

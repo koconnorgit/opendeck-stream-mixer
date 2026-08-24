@@ -1,0 +1,21 @@
+{
+  "name": "08a Firefox re-tags a LIVE Twitch sink-input with a just-opened Kick tab's title; the shift is deferred and dropped when Kick's own stream appears (9436fb8)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"ttv:nmplol","title":"nmplol live","artist":"Nmplol","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Nmplol - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol","name":"Nmplol - Twitch"} ] },
+    { "at_ms": 20000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol","name":"Nmplol - Twitch"} ] },
+    { "at_ms": 21000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Knut Stream - Watch Live on Kick"},
+                  {"uid":11,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol","name":"Nmplol - Twitch"},
+                  {"uid":11,"identity":null,"name":"Knut Stream - Watch Live on Kick"} ] },
+    { "at_ms": 25000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Nmplol - Twitch"},
+                  {"uid":11,"pid":1,"name":"Knut Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol"}, {"uid":11,"identity":"kick:knut"} ] }
+  ]
+}

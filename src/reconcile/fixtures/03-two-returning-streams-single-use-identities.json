@@ -1,0 +1,23 @@
+{
+  "name": "03 two Kick tabs muted together and returning together never both take one identity; ambiguity stays generic until a session signal (96c8667)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"kick:aaa","title":"Aaa Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:bbb","title":"Bbb Stream - Watch Live on Kick","active_ms":1000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Aaa Stream - Watch Live on Kick"},
+                  {"uid":11,"pid":1,"name":"Bbb Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:aaa"}, {"uid":11,"identity":"kick:bbb"} ] },
+    { "at_ms": 60000, "apps": [], "expect": [] },
+    { "at_ms": 60500,
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"}, {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":null}, {"uid":13,"identity":null} ],
+      "expect_poll": true },
+    { "at_ms": 61000,
+      "sessions": [
+        {"pid":1,"key":"kick:aaa","title":"Aaa Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:bbb","title":"Bbb Stream - Watch Live on Kick","active_ms":61000} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"}, {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":13,"identity":"kick:bbb"}, {"uid":12,"identity":"kick:aaa"} ] }
+  ]
+}

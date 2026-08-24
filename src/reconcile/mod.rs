@@ -9,6 +9,8 @@
 //! happen afterwards in `mixer::update_mixer_channels`. The replay tests in
 //! `replay.rs` drive it with recorded scenarios.
 
+#[cfg(test)]
+mod replay;
 mod resolve;
 pub mod sessions;
 

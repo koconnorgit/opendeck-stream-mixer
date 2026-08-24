@@ -1,0 +1,14 @@
+{
+  "name": "01 in-browser mute/unmute of a Twitch tab: the instant-departure tier re-identifies the recreated sink-input (17328af)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"ttv:nmplol","title":"Nmplol playing games","artist":"Nmplol","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Nmplol - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:nmplol","name":"Nmplol - Twitch"} ] },
+    { "at_ms": 3000, "apps": [], "expect": [] },
+    { "at_ms": 3400,
+      "apps":   [ {"uid":11,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":11,"identity":"ttv:nmplol","name":"Nmplol - Twitch"} ],
+      "expect_poll": false }
+  ]
+}

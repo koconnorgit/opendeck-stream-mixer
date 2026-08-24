@@ -1,0 +1,20 @@
+{
+  "name": "02 the Kick #2 case: a tab returns minutes later with no session signal; the sole departed identity is adopted (3bd8cbc)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"kick:aaa","title":"Aaa Stream - Watch Live on Kick","active_ms":0},
+        {"pid":1,"key":"kick:bbb","title":"Bbb Stream - Watch Live on Kick","active_ms":1000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Aaa Stream - Watch Live on Kick"},
+                  {"uid":11,"pid":1,"name":"Bbb Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:aaa"}, {"uid":11,"identity":"kick:bbb"} ] },
+    { "at_ms": 60000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Aaa Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"kick:aaa"} ] },
+    { "at_ms": 200000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Aaa Stream - Watch Live on Kick"},
+                  {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":10,"identity":"kick:aaa"},
+                  {"uid":12,"identity":"kick:bbb","name":"Bbb Stream - Watch Live on Kick"} ] }
+  ]
+}

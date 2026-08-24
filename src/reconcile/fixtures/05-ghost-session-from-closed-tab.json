@@ -1,0 +1,24 @@
+{
+  "name": "05 a closed tab's session lingers looking newest; it must never claim a returning stream (406c4e4)",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"ttv:x","title":"X live","artist":"X","active_ms":0},
+        {"pid":1,"key":"kick:y","title":"Y Stream - Watch Live on Kick","active_ms":5000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"X - Twitch"}, {"uid":11,"pid":1,"name":"Y Stream - Watch Live on Kick"} ],
+      "expect": [ {"uid":10,"identity":"ttv:x"}, {"uid":11,"identity":"kick:y"} ] },
+    { "at_ms": 20000,
+      "apps":   [ {"uid":10,"pid":1,"name":"X - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:x"} ] },
+    { "at_ms": 90000, "apps": [], "expect": [] },
+    { "at_ms": 90400,
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":null} ] },
+    { "at_ms": 91000,
+      "sessions": [
+        {"pid":1,"key":"ttv:x","title":"X live","artist":"X","active_ms":91000},
+        {"pid":1,"key":"kick:y","title":"Y Stream - Watch Live on Kick","active_ms":5000} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:x","name":"X - Twitch"} ] }
+  ]
+}

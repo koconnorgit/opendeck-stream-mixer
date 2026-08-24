@@ -1,0 +1,13 @@
+{
+  "name": "10 unmuting the tab that already holds the active session emits no signal; the stale-but-newest session is still adopted once the departure has expired",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [ {"pid":1,"key":"ttv:x","title":"X live","artist":"X","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"X - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:x"} ] },
+    { "at_ms": 120000, "apps": [], "expect": [] },
+    { "at_ms": 800000,
+      "apps":   [ {"uid":11,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":11,"identity":"ttv:x","name":"X - Twitch"} ] }
+  ]
+}
