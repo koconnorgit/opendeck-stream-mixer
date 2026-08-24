@@ -245,18 +245,24 @@ fn recover_departed_identity(
         .collect();
     if instant.len() == 1 {
         let pick = &instant[0].0;
-        // ...unless the session table names a DIFFERENT recently-departed
-        // identity as what the browser currently reports playing. Then the
-        // instant tier is not reading a mute toggle, it is breaking a genuine
-        // tie on the 2-second boundary — two identities departed moments
-        // apart and only one stream came back (observed 2026-08-24: a closed
-        // Ludwig tab's departure outranked the sodapoppin session that was
-        // actually playing). Refuse instead of guessing: a wrong identity is
-        // sticky forever, because the channel then dismisses its own generic
-        // name as noise, while returning None leaves the channel generic —
-        // and generic channels re-attempt recovery on every refresh.
-        if let Some(active) = media_session::newer_session_than(pid, pick)
-            .filter(|active| candidates.iter().any(|(k, _)| k == active))
+        // ...unless the session table names DIFFERENT, NEWER content as what
+        // the browser is playing and no live stream accounts for it. That is
+        // the streamer-switch: the old stream's sink-input dies, the new tab
+        // is what is actually playing, and this tier would otherwise hand the
+        // replacement the identity that just left (observed 2026-08-24: the
+        // deck stayed on "sodapoppin - Twitch" through a switch to
+        // grandpoobear, and stayed there — a wrong identity is sticky
+        // forever, since the channel then dismisses its own generic name as
+        // noise). Refusing leaves the channel generic instead, and generic
+        // channels re-attempt recovery every refresh, where the session tiers
+        // resolve the new identity properly.
+        //
+        // The `worn` test is what preserves this tier's own purpose: on a
+        // mute toggle where ANOTHER tab holds the active session, that tab is
+        // audible and therefore already wears its identity on a live channel,
+        // so it explains itself and never vetoes the returning stream.
+        if let Some(active) =
+            media_session::newer_session_than(pid, pick).filter(|active| !worn.contains(active))
         {
             println!(
                 "Departed-identity guess {pick:?} refused for pid={pid}: \
@@ -1167,15 +1173,25 @@ mod tests {
             Some("ttv:ludwig")
         );
 
-        // A newer session that never had a stream of its own is not a rival
-        // candidate — the instant departure still wins (a tab playing muted
-        // from the start holds the session but explains no departure).
+        // A newer session that no live stream wears also vetoes, even though
+        // it never departed: this is the streamer-switch (the new tab is what
+        // is playing, the departure is the tab being left behind).
         crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", ago(600));
-        crate::media_session::test_seed_session(pid, "yt:silent", "Silent", now);
+        crate::media_session::test_seed_session(pid, "ttv:switched", "Switched", now);
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), now),
+            None,
+            "a fresher unaccounted-for session vetoes the instant tier"
+        );
+
+        // ...but once a LIVE stream wears that newer session, it explains
+        // itself and must not veto — this is the mute toggle where another
+        // audible tab holds the active session, the case this tier exists for.
+        let worn: HashSet<String> = [String::from("ttv:switched")].into();
+        assert_eq!(
+            recover_departed_identity(pid, &worn, now).as_deref(),
             Some("ttv:ludwig"),
-            "only a rival DEPARTURE may veto the instant tier"
+            "an identity worn by a live stream never vetoes"
         );
 
         crate::media_session::test_clear_sessions(pid);
