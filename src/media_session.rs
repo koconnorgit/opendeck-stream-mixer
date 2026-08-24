@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
 
+use crate::reconcile::sessions::{SessionRow, SessionSnapshot};
 use futures_lite::StreamExt;
 use zbus::zvariant::OwnedValue;
 
@@ -172,123 +173,27 @@ fn single_channel_segment(path: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Shadow matching (what the new pipeline WOULD decide for a sink-input)
+// Snapshot for the reconciler
 // ---------------------------------------------------------------------------
 
-/// Twitch tab titles reach PulseAudio as `"<Channel> - Twitch"`; the channel
-/// login (lowercased) joins them to a `ttv:` identity. Lowercasing first makes
-/// the ASCII-suffix strip char-boundary-safe by construction.
-fn twitch_login_from_media_name(media_name: &str) -> Option<String> {
-    let login = media_name.trim().to_lowercase().strip_suffix(" - twitch")?.trim().to_string();
-    (!login.is_empty() && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .then_some(login)
-}
-
-/// Match one sink-input to a learned identity, per the design's matching
-/// order: self-identifying `media.name` first (Twitch/Kick carry the channel
-/// in the name), then a boilerplate-cleaned title match against sessions
-/// learned on this PID (YouTube, generic sites). Both sides go through
-/// `clean_stream_title` — `media.name` carries `" - YouTube"`-style suffixes
-/// that `xesam:title` lacks (soak 2026-07-04 caught this). No
-/// collision-recovery here; that stays in the mixer until phase 3.
-pub fn match_identity(pid: u32, media_name: &str) -> Option<String> {
-    if let Some(login) = twitch_login_from_media_name(media_name) {
-        return Some(format!("ttv:{login}"));
-    }
-    if let Some(slug) = crate::kick::kick_slug(media_name) {
-        return Some(format!("kick:{slug}"));
-    }
-    let wanted = crate::mpris::clean_stream_title(media_name).to_lowercase();
-    if wanted.is_empty() || crate::mpris::is_generic_name(&wanted) {
-        return None;
-    }
+/// Clone the sessions learned on `pids` into an immutable view. The
+/// reconciler decides identities against this copy only (see
+/// `reconcile::sessions`), so the decision layer never holds this lock.
+pub fn snapshot(pids: &HashSet<u32>) -> SessionSnapshot {
     let sessions = SESSIONS.lock().unwrap();
-    sessions
-        .iter()
-        .find(|((p, _), rec)| {
-            *p == pid && crate::mpris::clean_stream_title(&rec.title).to_lowercase() == wanted
-        })
-        .map(|((_, key), _)| key.clone())
-}
-
-/// Canonical display name for an identity. Twitch is rebuilt from the
-/// session's `xesam:artist` (a recreated sink-input wears the active Media
-/// Session title, which for Twitch is the *stream subtitle* rather than the
-/// "Nmplol - Twitch" tab title); everything else uses the session's own title
-/// (tab title for Kick, video title for YouTube/Web).
-pub fn display_name_for(pid: u32, key: &str) -> Option<String> {
-    let sessions = SESSIONS.lock().unwrap();
-    let record = sessions.get(&(pid, key.to_string()));
-    if let Some(login) = key.strip_prefix("ttv:") {
-        let artist = record.and_then(|r| r.artist.clone());
-        return Some(format!("{} - Twitch", artist.unwrap_or_else(|| login.to_string())));
-    }
-    record.map(|r| r.title.clone())
-}
-
-/// How recently a session must have been the active one for
-/// `recover_recent_identity` to pin a just-created stream on it. Sink-input
-/// creation and the tab's Media Session activation happen within moments of
-/// each other (both are "this tab started playing").
-const RECOVERY_WINDOW: Duration = Duration::from_secs(15);
-
-/// Re-identify a stream whose `media.name` can't be trusted (generic, or
-/// wearing another live stream's title). The freshest unworn session on the
-/// PID is adopted when either:
-///  - it signaled within `RECOVERY_WINDOW` (the tab that just started playing
-///    re-activated its session moments ago), or
-///  - it is the PID's *current active session* (nothing on the PID is newer).
-///    Unmuting a tab that was already the active session emits NO metadata
-///    change — its record looks stale even though the browser is actively
-///    reporting that content as playing (observed 2026-07-04: Twitch
-///    mute/unmute never recovered while Kick always did).
-/// Never returns an identity another live stream already wears (`worn`).
-/// `ghostable` holds identities whose channels recently departed: a STALE
-/// candidate in that set is a likely ghost — a closed tab's session lingers
-/// looking "newest" but will never signal again — and is refused; a FRESH
-/// signal proves the tab is alive regardless. A stale non-active candidate is
-/// always refused rather than guessed.
-pub fn recover_recent_identity(
-    pid: u32,
-    worn: &HashSet<String>,
-    ghostable: &HashSet<String>,
-    now: SystemTime,
-) -> Option<String> {
-    let sessions = SESSIONS.lock().unwrap();
-    let newest_on_pid = sessions
-        .iter()
-        .filter(|((p, _), _)| *p == pid)
-        .map(|(_, rec)| rec.last_active)
-        .max()?;
-    sessions
-        .iter()
-        .filter(|((p, key), _)| *p == pid && !worn.contains(key))
-        .max_by_key(|(_, rec)| rec.last_active)
-        .filter(|((_, key), rec)| {
-            let fresh = now
-                .duration_since(rec.last_active)
-                .map(|age| age < RECOVERY_WINDOW)
-                .unwrap_or(true);
-            fresh || (rec.last_active >= newest_on_pid && !ghostable.contains(key.as_str()))
-        })
-        .map(|((_, key), _)| key.clone())
-}
-
-/// The PID's newest session key, when it is strictly newer than `key`'s own
-/// record (or `key` has no record at all). `None` when `key` IS the PID's
-/// current active session, or when the table knows nothing about this PID.
-///
-/// The mixer uses this to notice that a departure-recency guess disagrees with
-/// what the browser currently reports as playing.
-pub fn newer_session_than(pid: u32, key: &str) -> Option<String> {
-    let sessions = SESSIONS.lock().unwrap();
-    let own = sessions.get(&(pid, key.to_string())).map(|r| r.last_active);
-    sessions
-        .iter()
-        .filter(|((p, k), _)| *p == pid && k != key)
-        .max_by_key(|(_, rec)| rec.last_active)
-        .filter(|(_, rec)| own.map(|t| rec.last_active > t).unwrap_or(true))
-        .map(|((_, k), _)| k.clone())
+    SessionSnapshot::new(
+        sessions
+            .iter()
+            .filter(|((p, _), _)| pids.contains(p))
+            .map(|((pid, key), rec)| SessionRow {
+                pid: *pid,
+                key: key.clone(),
+                title: rec.title.clone(),
+                artist: rec.artist.clone(),
+                last_active: rec.last_active,
+            })
+            .collect(),
+    )
 }
 
 /// Browser-published art captured for a learned session, if any.
@@ -708,56 +613,12 @@ fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
     Some(key)
 }
 
-/// Test-only helpers for seeding the session table from other modules' tests
-/// (each test uses a private PID so the process-global table stays isolated).
-#[cfg(test)]
-pub fn test_seed_session(pid: u32, key: &str, title: &str, last_active: SystemTime) {
-    SESSIONS.lock().unwrap().insert(
-        (pid, key.to_string()),
-        SessionRecord {
-            identity: MediaIdentity::Web {
-                host: "test".into(),
-                title: title.into(),
-            },
-            title: title.to_string(),
-            artist: None,
-            art: None,
-            last_active,
-            dormant_since: None,
-        },
-    );
-}
-
-#[cfg(test)]
-pub fn test_clear_sessions(pid: u32) {
-    SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ident(url: &str, title: &str) -> Option<String> {
         identity_from_url(url, title).map(|i| i.key())
-    }
-
-    #[test]
-    fn newer_session_than_names_only_a_strictly_newer_active_session() {
-        let pid = 930_010;
-        let now = SystemTime::now();
-        let ago = |s: u64| now - Duration::from_secs(s);
-        test_seed_session(pid, "ttv:old", "Old", ago(600));
-        test_seed_session(pid, "ttv:new", "New", ago(30));
-
-        assert_eq!(newer_session_than(pid, "ttv:old").as_deref(), Some("ttv:new"));
-        // The newest session is not newer than itself.
-        assert_eq!(newer_session_than(pid, "ttv:new"), None);
-        // A key with no record at all is superseded by whatever is newest.
-        assert_eq!(newer_session_than(pid, "kick:absent").as_deref(), Some("ttv:new"));
-        // Another PID's sessions are invisible.
-        assert_eq!(newer_session_than(pid + 1, "ttv:old"), None);
-
-        test_clear_sessions(pid);
     }
 
     #[test]
@@ -816,19 +677,8 @@ mod tests {
     }
 
     #[test]
-    fn twitch_media_name_yields_login() {
-        assert_eq!(
-            twitch_login_from_media_name("Nmplol - Twitch").as_deref(),
-            Some("nmplol")
-        );
-        assert_eq!(twitch_login_from_media_name("Some Song - YouTube"), None);
-        // Emoji title must not panic (post-684ebf4 rule) and is not a login.
-        assert_eq!(twitch_login_from_media_name("🎵🎵🎵🎵"), None);
-    }
-
-    #[test]
-    fn match_uses_learned_session_title_and_art() {
-        let pid = 910_001; // private test PID, same convention as mixer tests
+    fn snapshot_exposes_learned_session_and_art_is_read_from_the_table() {
+        let pid = 910_001; // private test PID so the process-global table stays isolated
         SESSIONS.lock().unwrap().insert(
             (pid, "yt:abc123".into()),
             SessionRecord {
@@ -842,131 +692,14 @@ mod tests {
                 dormant_since: None,
             },
         );
+        let snap = snapshot(&[pid].into());
         assert_eq!(
-            match_identity(pid, "Example Video Title").as_deref(),
+            snap.match_identity(pid, "Example Video Title").as_deref(),
             Some("yt:abc123")
         );
         assert_eq!(session_art(pid, "yt:abc123").map(|a| a.len()), Some(2048));
-        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
-    }
-
-    #[test]
-    fn recovers_most_recent_unworn_session() {
-        let pid = 910_006;
-        let now = SystemTime::now();
-        let mut mk = |key: &str, title: &str, age_secs: u64| {
-            SESSIONS.lock().unwrap().insert(
-                (pid, key.to_string()),
-                SessionRecord {
-                    identity: MediaIdentity::Web {
-                        host: "x".into(),
-                        title: title.into(),
-                    },
-                    title: title.into(),
-                    artist: None,
-                    art: None,
-                    last_active: now - Duration::from_secs(age_secs),
-                    dormant_since: None,
-                },
-            );
-        };
-        mk("ttv:fresh", "Fresh", 2); // just became active (the unmuting tab)
-        mk("yt:stale", "Stale", 600); // an old Short, outside the window
-
-        // Freshest unworn session wins.
-        assert_eq!(
-            recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now).as_deref(),
-            Some("ttv:fresh")
-        );
-        // A worn identity is never re-adopted; the stale one is neither fresh
-        // nor the pid's newest session, so it's refused.
-        let worn: HashSet<String> = [String::from("ttv:fresh")].into();
-        assert_eq!(recover_recent_identity(pid, &worn, &HashSet::new(), now), None);
-        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
-    }
-
-    #[test]
-    fn recovers_stale_session_when_it_is_the_current_active_one() {
-        // Unmuting a tab that was ALREADY the active session emits no metadata
-        // change — the record is stale, but it's still the pid's newest, i.e.
-        // what the browser reports as playing. Must be adopted.
-        let pid = 910_007;
-        SESSIONS.lock().unwrap().insert(
-            (pid, "ttv:nmplol".into()),
-            SessionRecord {
-                identity: MediaIdentity::Twitch {
-                    login: "nmplol".into(),
-                },
-                title: "Some Subtitle".into(),
-                artist: Some("Nmplol".into()),
-                art: None,
-                last_active: SystemTime::now() - Duration::from_secs(1200),
-                dormant_since: None,
-            },
-        );
-        let now = SystemTime::now();
-        assert_eq!(
-            recover_recent_identity(pid, &HashSet::new(), &HashSet::new(), now).as_deref(),
-            Some("ttv:nmplol")
-        );
-        // But once a live stream wears it, it is never handed out again.
-        let worn: HashSet<String> = [String::from("ttv:nmplol")].into();
-        assert_eq!(recover_recent_identity(pid, &worn, &HashSet::new(), now), None);
-        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
-    }
-
-    #[test]
-    fn matches_suffixed_media_name_to_unsuffixed_session_title() {
-        // Soak 2026-07-04: media.name carries " - YouTube" boilerplate that
-        // xesam:title lacks; both sides must be cleaned before comparing.
-        let pid = 910_003;
-        SESSIONS.lock().unwrap().insert(
-            (pid, "yt:xyz789".into()),
-            SessionRecord {
-                identity: MediaIdentity::YouTube {
-                    video_id: "xyz789".into(),
-                },
-                title: "Cool Video".into(),
-                artist: None,
-                art: None,
-                last_active: SystemTime::now(),
-                dormant_since: None,
-            },
-        );
-        assert_eq!(
-            match_identity(pid, "Cool Video - YouTube").as_deref(),
-            Some("yt:xyz789")
-        );
-        SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
-    }
-
-    #[test]
-    fn canonical_twitch_display_name_from_artist() {
-        let pid = 910_004;
-        SESSIONS.lock().unwrap().insert(
-            (pid, "ttv:nmplol".into()),
-            SessionRecord {
-                identity: MediaIdentity::Twitch {
-                    login: "nmplol".into(),
-                },
-                title: "Some Stream Subtitle".into(),
-                artist: Some("Nmplol".into()),
-                art: None,
-                last_active: SystemTime::now(),
-                dormant_since: None,
-            },
-        );
-        assert_eq!(
-            display_name_for(pid, "ttv:nmplol").as_deref(),
-            Some("Nmplol - Twitch")
-        );
-        // No session record → login fallback; non-Twitch identities → None.
-        assert_eq!(
-            display_name_for(910_005, "ttv:somelogin").as_deref(),
-            Some("somelogin - Twitch")
-        );
-        assert_eq!(display_name_for(pid, "yt:abc123"), None);
-        assert_eq!(display_name_for(pid, "kick:xqc"), None);
+        // Other PIDs are not in the view.
+        assert!(snapshot(&[pid + 1].into()).rows.is_empty());
         SESSIONS.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
@@ -979,11 +712,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn twitch_media_name_matches_identity_without_a_session() {
-        assert_eq!(
-            match_identity(910_002, "Nmplol - Twitch").as_deref(),
-            Some("ttv:nmplol")
-        );
-    }
 }

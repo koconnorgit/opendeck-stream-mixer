@@ -1,5 +1,6 @@
 use crate::audio::audio_system::AppInfo;
 use crate::media_session::{self, ChannelArt};
+use crate::reconcile::sessions::SessionSnapshot;
 use crate::utils::get_app_icon_uri;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -211,6 +212,7 @@ fn departed_keys_for(pid: u32, now: SystemTime) -> HashSet<String> {
 fn recover_departed_identity(
     pid: u32,
     worn: &HashSet<String>,
+    sessions: &SessionSnapshot,
     now: SystemTime,
 ) -> Option<String> {
     // Snapshot and release: the session-table consultation below must not run
@@ -262,7 +264,7 @@ fn recover_departed_identity(
         // audible and therefore already wears its identity on a live channel,
         // so it explains itself and never vetoes the returning stream.
         if let Some(active) =
-            media_session::newer_session_than(pid, pick).filter(|active| !worn.contains(active))
+            sessions.newer_session_than(pid, pick).filter(|active| !worn.contains(active))
         {
             println!(
                 "Departed-identity guess {pick:?} refused for pid={pid}: \
@@ -369,6 +371,12 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
 
     let now = SystemTime::now();
 
+    // One immutable view of the session table for this whole refresh: every
+    // identity decision below is a function of this snapshot, never the live
+    // table.
+    let pids: HashSet<u32> = active_apps.iter().filter_map(|a| a.pid).collect();
+    let sessions = media_session::snapshot(&pids);
+
     // Count cleaned media.names per PID across all live streams. A count > 1
     // means two streams in one browser process share a (cleaned) title — the
     // tell-tale that Firefox tagged a sink-input with the active session's
@@ -393,7 +401,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
     for a in &active_apps {
         if let Some(key) = a
             .pid
-            .and_then(|pid| media_session::match_identity(pid, &a.app_name))
+            .and_then(|pid| sessions.match_identity(pid, &a.app_name))
         {
             *identity_counts.entry(key).or_insert(0) += 1;
         }
@@ -459,7 +467,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
     for app in active_apps {
         let raw_identity = app
             .pid
-            .and_then(|pid| media_session::match_identity(pid, &app.app_name));
+            .and_then(|pid| sessions.match_identity(pid, &app.app_name));
 
         let mut channel = match previous_by_uid.remove(&app.uid) {
             Some(prev) => reconcile_existing(
@@ -470,6 +478,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
                 &identity_counts,
                 &recovery_worn,
                 &channel_worn,
+                &sessions,
                 now,
             ),
             None => build_new(
@@ -479,6 +488,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
                 &channel_worn,
                 &title_collides,
                 &identity_counts,
+                &sessions,
                 now,
             ),
         };
@@ -504,7 +514,7 @@ pub async fn update_mixer_channels(applications: Vec<AppInfo>, ignored_apps: &[S
         channel.lower_vol_btn_id = None;
         channel.dial_id = None;
 
-        resolve_channel_art(&mut channel, &app, &mut claimed);
+        resolve_channel_art(&mut channel, &app, &sessions, &mut claimed);
 
         built.push(channel);
     }
@@ -585,6 +595,7 @@ fn reconcile_existing(
     identity_counts: &HashMap<String, usize>,
     recovery_worn: &HashSet<String>,
     channel_worn: &HashSet<String>,
+    sessions: &SessionSnapshot,
     now: SystemTime,
 ) -> MixerChannel {
     let raw = &app.app_name;
@@ -663,8 +674,8 @@ fn reconcile_existing(
             // Departures first: a session from a just-closed tab can still look
             // "freshest" (ghost), while a departure names a stream that really
             // vanished. Session tiers cover unmutes that re-signal.
-            recover_departed_identity(pid, recovery_worn, now).or_else(|| {
-                media_session::recover_recent_identity(
+            recover_departed_identity(pid, recovery_worn, sessions, now).or_else(|| {
+                sessions.recover_recent_identity(
                     pid,
                     recovery_worn,
                     &departed_keys_for(pid, now),
@@ -680,7 +691,7 @@ fn reconcile_existing(
             // or "AudioStream" sticks forever.
             let name = app
                 .pid
-                .and_then(|pid| media_session::display_name_for(pid, &key))
+                .and_then(|pid| sessions.display_name_for(pid, &key))
                 .unwrap_or_else(|| prev.app_name.clone());
             println!(
                 "Recovered identity {:?} ({}) for generic stream uid={}",
@@ -720,6 +731,7 @@ fn build_new(
     channel_worn: &HashSet<String>,
     title_collides: &dyn Fn(Option<u32>, &str) -> bool,
     identity_counts: &HashMap<String, usize>,
+    sessions: &SessionSnapshot,
     now: SystemTime,
 ) -> MixerChannel {
     let raw = &app.app_name;
@@ -752,8 +764,8 @@ fn build_new(
         // just-closed tab can still look "freshest" (ghost). Session tiers
         // then cover unmutes that re-signal and the already-active-tab case.
         let recovered = app.pid.and_then(|pid| {
-            recover_departed_identity(pid, recovery_worn, now).or_else(|| {
-                media_session::recover_recent_identity(
+            recover_departed_identity(pid, recovery_worn, sessions, now).or_else(|| {
+                sessions.recover_recent_identity(
                     pid,
                     recovery_worn,
                     &departed_keys_for(pid, now),
@@ -765,7 +777,7 @@ fn build_new(
             Some(key) => {
                 let name = app
                     .pid
-                    .and_then(|pid| media_session::display_name_for(pid, &key))
+                    .and_then(|pid| sessions.display_name_for(pid, &key))
                     .unwrap_or_else(|| raw.clone());
                 println!(
                     "Recovered identity {:?} ({}) for new stream uid={} (reported {:?})",
@@ -855,6 +867,7 @@ fn build_new(
 fn resolve_channel_art(
     channel: &mut MixerChannel,
     app: &AppInfo,
+    sessions: &SessionSnapshot,
     claimed: &mut HashMap<String, u32>,
 ) {
     let identity_art = match (&channel.identity, channel.pid) {
@@ -865,7 +878,7 @@ fn resolve_channel_art(
                     claimed.insert(key.clone(), channel.uid);
                     // Keep the display name canonical (Twitch subtitles → the
                     // "<Artist> - Twitch" tab form; others → session title).
-                    if let Some(canon) = media_session::display_name_for(pid, key) {
+                    if let Some(canon) = sessions.display_name_for(pid, key) {
                         channel.app_name = canon;
                     }
                     match media_session::art_for_identity(pid, key) {
@@ -1027,6 +1040,11 @@ mod tests {
         |_, _| false
     }
 
+    fn snap(rows: Vec<crate::reconcile::sessions::SessionRow>) -> SessionSnapshot {
+        SessionSnapshot::new(rows)
+    }
+    use crate::reconcile::sessions::test_support::row;
+
     #[test]
     fn existing_channel_ignores_generic_noise_while_wearing_identity() {
         let mut prev = bare_channel("Nmplol - Twitch", None, false);
@@ -1040,6 +1058,7 @@ mod tests {
             &HashMap::new(),
             &HashSet::new(),
             &HashSet::new(),
+            &snap(vec![]),
             SystemTime::now(),
         );
         assert_eq!(out.app_name, "Nmplol - Twitch");
@@ -1058,6 +1077,7 @@ mod tests {
             &HashMap::new(),
             &HashSet::new(),
             &HashSet::new(),
+            &snap(vec![]),
             SystemTime::now(),
         );
         assert_eq!(out.identity.as_deref(), Some("ttv:nmplol"));
@@ -1079,6 +1099,7 @@ mod tests {
             &counts,
             &HashSet::new(),
             &HashSet::new(),
+            &snap(vec![]),
             SystemTime::now(),
         );
         assert_eq!(out.identity, None);
@@ -1095,12 +1116,12 @@ mod tests {
         }
         // Unique departed identity → adopted.
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), &snap(vec![]), now).as_deref(),
             Some("kick:b")
         );
         // Worn → refused.
         let worn: HashSet<String> = [String::from("kick:b")].into();
-        assert_eq!(recover_departed_identity(pid, &worn, now), None);
+        assert_eq!(recover_departed_identity(pid, &worn, &snap(vec![]), now), None);
         // A departure recorded THIS refresh outranks a merely-fresh one —
         // the same-batch replacement case, even with a ghost around.
         {
@@ -1108,7 +1129,7 @@ mod tests {
             departed.insert((pid, "yt:ghost".into()), now - std::time::Duration::from_secs(5));
         }
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), &snap(vec![]), now).as_deref(),
             Some("kick:b"),
             "same-refresh departure beats a fresh ghost"
         );
@@ -1119,7 +1140,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert((pid, "ttv:c".into()), now);
-        assert_eq!(recover_departed_identity(pid, &HashSet::new(), now), None);
+        assert_eq!(recover_departed_identity(pid, &HashSet::new(), &snap(vec![]), now), None);
         // A stale-but-valid departure (an old tab navigation) must not block
         // adopting the uniquely fresh one — the mute that just happened.
         {
@@ -1127,7 +1148,7 @@ mod tests {
             departed.insert((pid, "ttv:c".into()), now - std::time::Duration::from_secs(60));
         }
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), &snap(vec![]), now).as_deref(),
             Some("kick:b")
         );
         // Expired entries don't count at all.
@@ -1136,7 +1157,7 @@ mod tests {
             departed.insert((pid, "ttv:c".into()), now - DEPARTED_TTL);
         }
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), &snap(vec![]), now).as_deref(),
             Some("kick:b")
         );
         DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
@@ -1153,33 +1174,41 @@ mod tests {
         let pid = 920_030;
         let now = SystemTime::now();
         let ago = |s: u64| now - std::time::Duration::from_secs(s);
-        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", ago(600));
-        crate::media_session::test_seed_session(pid, "ttv:soda", "sodapoppin", ago(30));
+        let sessions = snap(vec![
+            row(pid, "ttv:ludwig", "Ludwig", ago(600)),
+            row(pid, "ttv:soda", "sodapoppin", ago(30)),
+        ]);
         {
             let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
             departed.insert((pid, "ttv:soda".into()), ago(5)); // outside INSTANT
             departed.insert((pid, "ttv:ludwig".into()), now); // inside INSTANT
         }
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now),
+            recover_departed_identity(pid, &HashSet::new(), &sessions, now),
             None,
             "contradicted guess must be refused, not adopted"
         );
 
         // The pick IS the active session → no contradiction, adopt as before.
-        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", now);
+        let sessions = snap(vec![
+            row(pid, "ttv:ludwig", "Ludwig", now),
+            row(pid, "ttv:soda", "sodapoppin", ago(30)),
+        ]);
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            recover_departed_identity(pid, &HashSet::new(), &sessions, now).as_deref(),
             Some("ttv:ludwig")
         );
 
         // A newer session that no live stream wears also vetoes, even though
         // it never departed: this is the streamer-switch (the new tab is what
         // is playing, the departure is the tab being left behind).
-        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", ago(600));
-        crate::media_session::test_seed_session(pid, "ttv:switched", "Switched", now);
+        let sessions = snap(vec![
+            row(pid, "ttv:ludwig", "Ludwig", ago(600)),
+            row(pid, "ttv:soda", "sodapoppin", ago(30)),
+            row(pid, "ttv:switched", "Switched", now),
+        ]);
         assert_eq!(
-            recover_departed_identity(pid, &HashSet::new(), now),
+            recover_departed_identity(pid, &HashSet::new(), &sessions, now),
             None,
             "a fresher unaccounted-for session vetoes the instant tier"
         );
@@ -1189,12 +1218,11 @@ mod tests {
         // audible tab holds the active session, the case this tier exists for.
         let worn: HashSet<String> = [String::from("ttv:switched")].into();
         assert_eq!(
-            recover_departed_identity(pid, &worn, now).as_deref(),
+            recover_departed_identity(pid, &worn, &sessions, now).as_deref(),
             Some("ttv:ludwig"),
             "an identity worn by a live stream never vetoes"
         );
 
-        crate::media_session::test_clear_sessions(pid);
         DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 
@@ -1204,12 +1232,12 @@ mod tests {
         // unmuted tab's session re-published. A later refresh (queued by the
         // watcher when the session lands) must re-identify it.
         let pid = 920_001;
-        crate::media_session::test_seed_session(
+        let sessions = snap(vec![row(
             pid,
             "kick:asmongold247",
             "Asmongold247 Stream - Watch Live on Kick",
             SystemTime::now(),
-        );
+        )]);
         let mut prev = bare_channel("AudioStream", None, false);
         prev.pid = Some(pid);
         let a = {
@@ -1225,22 +1253,22 @@ mod tests {
             &HashMap::new(),
             &HashSet::new(),
             &HashSet::new(),
+            &sessions,
             SystemTime::now(),
         );
         assert_eq!(out.identity.as_deref(), Some("kick:asmongold247"));
         assert_eq!(out.app_name, "Asmongold247 Stream - Watch Live on Kick");
-        crate::media_session::test_clear_sessions(pid);
     }
 
     #[test]
     fn existing_generic_channel_never_recovers_a_worn_identity() {
         let pid = 920_002;
-        crate::media_session::test_seed_session(
+        let sessions = snap(vec![row(
             pid,
             "kick:asmongold247",
             "Asmongold247 Stream - Watch Live on Kick",
             SystemTime::now(),
-        );
+        )]);
         let mut prev = bare_channel("AudioStream", None, false);
         prev.pid = Some(pid);
         let a = app(1, Some(pid), "AudioStream");
@@ -1253,11 +1281,11 @@ mod tests {
             &HashMap::new(),
             &worn,
             &HashSet::new(),
+            &sessions,
             SystemTime::now(),
         );
         assert_eq!(out.identity, None);
         assert_eq!(out.app_name, "AudioStream");
-        crate::media_session::test_clear_sessions(pid);
     }
 
     #[test]
@@ -1275,6 +1303,7 @@ mod tests {
             &prev_ids,
             &no_collision(),
             &HashMap::new(),
+            &snap(vec![]),
             SystemTime::now(),
         );
         // Never a different identity either: adopting one would guess against
@@ -1307,6 +1336,7 @@ mod tests {
             &HashSet::new(),
             &no_collision(),
             &HashMap::new(),
+            &snap(vec![]),
             now,
         );
         assert_eq!(out.identity, None, "not adopted instantly");
@@ -1323,6 +1353,7 @@ mod tests {
             &HashSet::new(),
             &no_collision(),
             &HashMap::new(),
+            &snap(vec![]),
             later,
         );
         assert_eq!(out2.identity.as_deref(), Some("kick:knut"));
