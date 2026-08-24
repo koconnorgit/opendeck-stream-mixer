@@ -213,25 +213,29 @@ fn recover_departed_identity(
     worn: &HashSet<String>,
     now: SystemTime,
 ) -> Option<String> {
-    let departed = DEPARTED_IDENTITIES.lock().unwrap();
-    let candidates: Vec<(&String, SystemTime)> = departed
-        .iter()
-        .filter(|((p, key), at)| {
-            *p == pid
-                && !worn.contains(key)
-                && now
-                    .duration_since(**at)
-                    .map(|age| age < DEPARTED_TTL)
-                    .unwrap_or(true)
-        })
-        .map(|((_, key), at)| (key, *at))
-        .collect();
+    // Snapshot and release: the session-table consultation below must not run
+    // under this lock.
+    let candidates: Vec<(String, SystemTime)> = {
+        let departed = DEPARTED_IDENTITIES.lock().unwrap();
+        departed
+            .iter()
+            .filter(|((p, key), at)| {
+                *p == pid
+                    && !worn.contains(key)
+                    && now
+                        .duration_since(**at)
+                        .map(|age| age < DEPARTED_TTL)
+                        .unwrap_or(true)
+            })
+            .map(|((_, key), at)| (key.clone(), *at))
+            .collect()
+    };
 
     // A departure from the mute toggle happening right now (this refresh or
     // the removal-refresh moments before it) almost certainly belongs to the
     // stream being built. Outranks everything — including a ghost session
     // from a just-closed tab that still looks "freshest" in the session table.
-    let instant: Vec<&(&String, SystemTime)> = candidates
+    let instant: Vec<&(String, SystemTime)> = candidates
         .iter()
         .filter(|(_, at)| {
             now.duration_since(*at)
@@ -240,7 +244,27 @@ fn recover_departed_identity(
         })
         .collect();
     if instant.len() == 1 {
-        return Some(instant[0].0.clone());
+        let pick = &instant[0].0;
+        // ...unless the session table names a DIFFERENT recently-departed
+        // identity as what the browser currently reports playing. Then the
+        // instant tier is not reading a mute toggle, it is breaking a genuine
+        // tie on the 2-second boundary — two identities departed moments
+        // apart and only one stream came back (observed 2026-08-24: a closed
+        // Ludwig tab's departure outranked the sodapoppin session that was
+        // actually playing). Refuse instead of guessing: a wrong identity is
+        // sticky forever, because the channel then dismisses its own generic
+        // name as noise, while returning None leaves the channel generic —
+        // and generic channels re-attempt recovery on every refresh.
+        if let Some(active) = media_session::newer_session_than(pid, pick)
+            .filter(|active| candidates.iter().any(|(k, _)| k == active))
+        {
+            println!(
+                "Departed-identity guess {pick:?} refused for pid={pid}: \
+                 session table reports {active:?} playing"
+            );
+            return None;
+        }
+        return Some(pick.clone());
     }
 
     // Otherwise only a SOLE candidate is safe. (A wider "uniquely fresh"
@@ -1109,6 +1133,52 @@ mod tests {
             recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
             Some("kick:b")
         );
+        DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
+    }
+
+    #[test]
+    fn instant_departure_refused_when_session_table_names_another_departure() {
+        // Observed 2026-08-24: a Ludwig tab and a sodapoppin tab both lost
+        // their sink-inputs seconds apart, then ONE stream came back. Ludwig's
+        // departure was the more recent, so the instant tier handed the new
+        // stream ttv:ludwig — permanently, since a channel wearing an identity
+        // dismisses its own generic "AudioStream" as noise. The session table
+        // knew sodapoppin was what Firefox was actually playing.
+        let pid = 920_030;
+        let now = SystemTime::now();
+        let ago = |s: u64| now - std::time::Duration::from_secs(s);
+        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", ago(600));
+        crate::media_session::test_seed_session(pid, "ttv:soda", "sodapoppin", ago(30));
+        {
+            let mut departed = DEPARTED_IDENTITIES.lock().unwrap();
+            departed.insert((pid, "ttv:soda".into()), ago(5)); // outside INSTANT
+            departed.insert((pid, "ttv:ludwig".into()), now); // inside INSTANT
+        }
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now),
+            None,
+            "contradicted guess must be refused, not adopted"
+        );
+
+        // The pick IS the active session → no contradiction, adopt as before.
+        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", now);
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("ttv:ludwig")
+        );
+
+        // A newer session that never had a stream of its own is not a rival
+        // candidate — the instant departure still wins (a tab playing muted
+        // from the start holds the session but explains no departure).
+        crate::media_session::test_seed_session(pid, "ttv:ludwig", "Ludwig", ago(600));
+        crate::media_session::test_seed_session(pid, "yt:silent", "Silent", now);
+        assert_eq!(
+            recover_departed_identity(pid, &HashSet::new(), now).as_deref(),
+            Some("ttv:ludwig"),
+            "only a rival DEPARTURE may veto the instant tier"
+        );
+
+        crate::media_session::test_clear_sessions(pid);
         DEPARTED_IDENTITIES.lock().unwrap().retain(|(p, _), _| *p != pid);
     }
 

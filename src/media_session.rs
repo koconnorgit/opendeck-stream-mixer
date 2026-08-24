@@ -274,6 +274,23 @@ pub fn recover_recent_identity(
         .map(|((_, key), _)| key.clone())
 }
 
+/// The PID's newest session key, when it is strictly newer than `key`'s own
+/// record (or `key` has no record at all). `None` when `key` IS the PID's
+/// current active session, or when the table knows nothing about this PID.
+///
+/// The mixer uses this to notice that a departure-recency guess disagrees with
+/// what the browser currently reports as playing.
+pub fn newer_session_than(pid: u32, key: &str) -> Option<String> {
+    let sessions = SESSIONS.lock().unwrap();
+    let own = sessions.get(&(pid, key.to_string())).map(|r| r.last_active);
+    sessions
+        .iter()
+        .filter(|((p, k), _)| *p == pid && k != key)
+        .max_by_key(|(_, rec)| rec.last_active)
+        .filter(|(_, rec)| own.map(|t| rec.last_active > t).unwrap_or(true))
+        .map(|((_, k), _)| k.clone())
+}
+
 /// Browser-published art captured for a learned session, if any.
 pub fn session_art(pid: u32, key: &str) -> Option<Arc<Vec<u8>>> {
     let sessions = SESSIONS.lock().unwrap();
@@ -722,6 +739,25 @@ mod tests {
 
     fn ident(url: &str, title: &str) -> Option<String> {
         identity_from_url(url, title).map(|i| i.key())
+    }
+
+    #[test]
+    fn newer_session_than_names_only_a_strictly_newer_active_session() {
+        let pid = 930_010;
+        let now = SystemTime::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        test_seed_session(pid, "ttv:old", "Old", ago(600));
+        test_seed_session(pid, "ttv:new", "New", ago(30));
+
+        assert_eq!(newer_session_than(pid, "ttv:old").as_deref(), Some("ttv:new"));
+        // The newest session is not newer than itself.
+        assert_eq!(newer_session_than(pid, "ttv:new"), None);
+        // A key with no record at all is superseded by whatever is newest.
+        assert_eq!(newer_session_than(pid, "kick:absent").as_deref(), Some("ttv:new"));
+        // Another PID's sessions are invisible.
+        assert_eq!(newer_session_than(pid + 1, "ttv:old"), None);
+
+        test_clear_sessions(pid);
     }
 
     #[test]
