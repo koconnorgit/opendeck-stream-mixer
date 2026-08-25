@@ -18,6 +18,12 @@ pub struct SessionRow {
     pub title: String,
     pub artist: Option<String>,
     pub last_active: SystemTime,
+    /// When this session last transitioned from a KNOWN non-Playing playback
+    /// status to Playing — the user pressing play on that specific tab (the
+    /// signal carries the tab's own `xesam:url`). Muted tabs keep reporting
+    /// "Playing", so Firefox's main-controller echo after an unmute never
+    /// produces one; a paused tab being resumed always does.
+    pub resumed_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -127,6 +133,17 @@ impl SessionSnapshot {
     /// asmongold unmuted first, Firefox emitted mizkif's metadata 100ms
     /// later, every time). With two muted tabs no observable signal says
     /// which one returned, so the honest answer is generic for both.
+    ///
+    /// EXCEPT when the candidate RESUMED — a Paused→Playing transition after
+    /// the latest departure. That signal carries the tab's own URL, so it is
+    /// that tab's play button, not the echo: muted tabs report "Playing"
+    /// throughout, so an unmute echo can't fake it. Without this exception a
+    /// channel-surf trail (several tabs opened and left within the departure
+    /// TTL) poisons the return to a paused tab: every departure is unclaimed,
+    /// the multi-departure rule refuses forever, and the stream sits generic
+    /// until the TTL drains (observed 2026-08-25: back to zackrawrr after
+    /// surfing esfandtv/avoidingthepuddle/cinna — "AudioStream" for 10 min
+    /// while the session table reported zackrawrr resuming and playing).
     pub fn recover_recent_identity(
         &self,
         pid: u32,
@@ -145,12 +162,16 @@ impl SessionSnapshot {
                     .map(|age| age < RECOVERY_WINDOW)
                     .unwrap_or(true);
                 let after_departures = latest_departure.map_or(true, |d| r.last_active > d);
-                let attributable = !departed.contains_key(r.key.as_str()) || departed.len() < 2;
+                let resumed_after = r
+                    .resumed_at
+                    .map_or(false, |t| latest_departure.map_or(true, |d| t > d));
+                let is_departed = departed.contains_key(r.key.as_str());
+                let attributable = !is_departed || departed.len() < 2 || resumed_after;
                 after_departures
                     && attributable
                     && (fresh
                         || (r.last_active >= newest_on_pid
-                            && !departed.contains_key(r.key.as_str())))
+                            && (!is_departed || resumed_after)))
             })
             .map(|r| r.key.clone())
     }
@@ -184,6 +205,7 @@ pub(crate) mod test_support {
             title: title.to_string(),
             artist: None,
             last_active,
+            resumed_at: None,
         }
     }
 }
@@ -298,6 +320,7 @@ mod tests {
             title: "Some Subtitle".into(),
             artist: Some("Nmplol".into()),
             last_active: now - Duration::from_secs(1200),
+            resumed_at: None,
         }]);
         assert_eq!(
             snap.recover_recent_identity(pid, &HashSet::new(), &HashMap::new(), now)
@@ -315,6 +338,49 @@ mod tests {
             [(String::from("ttv:nmplol"), now - Duration::from_secs(60))].into();
         assert_eq!(
             snap.recover_recent_identity(pid, &HashSet::new(), &departed, now),
+            None
+        );
+    }
+
+    #[test]
+    fn resumed_session_is_attributable_despite_a_departure_trail() {
+        // 2026-08-25: channel-surfing leaves several unclaimed departures on
+        // the PID; returning to a paused tab must still recover, because the
+        // Paused→Playing transition names that tab. Resume evidence OLDER than
+        // the latest departure proves nothing and must not attribute.
+        let pid = 1;
+        let now = SystemTime::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        let departed: HashMap<String, SystemTime> = [
+            (String::from("ttv:zack"), ago(78)),
+            (String::from("ttv:esfand"), ago(21)),
+            (String::from("ttv:cinna"), ago(1)),
+        ]
+        .into();
+
+        // Bumped (Paused) but not yet resumed: the multi-departure rule
+        // refuses — this could still be the unmute echo.
+        let mut zack = row(pid, "ttv:zack", "zackrawrr", now);
+        assert_eq!(
+            SessionSnapshot::new(vec![zack.clone()])
+                .recover_recent_identity(pid, &HashSet::new(), &departed, now),
+            None
+        );
+
+        // A Playing transition after the latest departure attributes it.
+        zack.resumed_at = Some(now);
+        assert_eq!(
+            SessionSnapshot::new(vec![zack.clone()])
+                .recover_recent_identity(pid, &HashSet::new(), &departed, now)
+                .as_deref(),
+            Some("ttv:zack")
+        );
+
+        // A resume that PRECEDES the latest departure is stale evidence.
+        zack.resumed_at = Some(ago(30));
+        assert_eq!(
+            SessionSnapshot::new(vec![zack])
+                .recover_recent_identity(pid, &HashSet::new(), &departed, now),
             None
         );
     }
@@ -338,6 +404,7 @@ mod tests {
             title: "Some Stream Subtitle".into(),
             artist: Some("Nmplol".into()),
             last_active: SystemTime::now(),
+            resumed_at: None,
         }]);
         assert_eq!(
             snap.display_name_for(1, "ttv:nmplol").as_deref(),

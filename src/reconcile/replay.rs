@@ -56,6 +56,9 @@ struct SessionSpec {
     #[serde(default)]
     artist: Option<String>,
     active_ms: u64,
+    /// When the session last transitioned (known non-Playing) → Playing.
+    #[serde(default)]
+    resumed_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +108,7 @@ fn run(fixture: &Fixture) {
                         title: r.title.clone(),
                         artist: r.artist.clone(),
                         last_active: base() + Duration::from_millis(r.active_ms),
+                        resumed_at: r.resumed_ms.map(|ms| base() + Duration::from_millis(ms)),
                     })
                     .collect(),
             );

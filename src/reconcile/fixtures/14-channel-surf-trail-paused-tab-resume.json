@@ -1,0 +1,48 @@
+{
+  "name": "14 channel-surf trail then return to the paused tab (2026-08-25 20:29): surfing zackrawrr→esfandtv→cinna leaves three unclaimed departures, so the multi-departure rule refused the returning zackrawrr stream forever ('AudioStream' until the departure TTL drained); the session's Paused→Playing resume after the last departure is that tab's own play button and must attribute it",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"ttv:zackrawrr","title":"BIG DAY HUGE DRAMA","artist":"zackrawrr","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"zackrawrr - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:zackrawrr","name":"zackrawrr - Twitch"} ] },
+
+    { "at_ms": 5000,
+      "sessions": [
+        {"pid":1,"key":"ttv:zackrawrr","title":"BIG DAY HUGE DRAMA","artist":"zackrawrr","active_ms":0},
+        {"pid":1,"key":"ttv:esfandtv","title":"IRL Stream","artist":"EsfandTV","active_ms":4900} ],
+      "apps":   [ {"uid":11,"pid":1,"name":"EsfandTV - Twitch"} ],
+      "expect": [ {"uid":11,"identity":"ttv:esfandtv"} ] },
+
+    { "at_ms": 60000,
+      "sessions": [
+        {"pid":1,"key":"ttv:zackrawrr","title":"BIG DAY HUGE DRAMA","artist":"zackrawrr","active_ms":0},
+        {"pid":1,"key":"ttv:esfandtv","title":"IRL Stream","artist":"EsfandTV","active_ms":4900},
+        {"pid":1,"key":"ttv:cinna","title":"cooking","artist":"Cinna","active_ms":59900} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"Cinna - Twitch"} ],
+      "expect": [ {"uid":12,"identity":"ttv:cinna"} ] },
+
+    { "at_ms": 75000, "apps": [], "expect": [] },
+
+    { "at_ms": 75600,
+      "sessions": [
+        {"pid":1,"key":"ttv:zackrawrr","title":"BIG DAY HUGE DRAMA","artist":"zackrawrr","active_ms":75300},
+        {"pid":1,"key":"ttv:esfandtv","title":"IRL Stream","artist":"EsfandTV","active_ms":4900},
+        {"pid":1,"key":"ttv:cinna","title":"cooking","artist":"Cinna","active_ms":59900} ],
+      "apps":   [ {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":13,"identity":null} ],
+      "expect_poll": true },
+
+    { "at_ms": 76100,
+      "sessions": [
+        {"pid":1,"key":"ttv:zackrawrr","title":"BIG DAY HUGE DRAMA","artist":"zackrawrr","active_ms":76000,"resumed_ms":76000},
+        {"pid":1,"key":"ttv:esfandtv","title":"IRL Stream","artist":"EsfandTV","active_ms":4900},
+        {"pid":1,"key":"ttv:cinna","title":"cooking","artist":"Cinna","active_ms":59900} ],
+      "apps":   [ {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":13,"identity":"ttv:zackrawrr","name":"zackrawrr - Twitch"} ] },
+
+    { "at_ms": 77000,
+      "apps":   [ {"uid":14,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":14,"identity":"ttv:zackrawrr"} ] }
+  ]
+}

@@ -69,9 +69,28 @@ struct SessionRecord {
     /// next session change, so these bytes are the only durable copy).
     art: Option<Arc<Vec<u8>>>,
     last_active: SystemTime,
+    /// Last playback status a signal actually carried (signals often omit
+    /// it); `None` until one does.
+    playback: Option<String>,
+    /// When playback last transitioned from a KNOWN non-Playing status to
+    /// Playing — the user pressing play on this session's own tab. Recovery
+    /// uses it to attribute a returning stream through a trail of unclaimed
+    /// departures (see `recover_recent_identity`).
+    resumed_at: Option<SystemTime>,
     /// Set when the owning player vanishes from the bus; prunes after
     /// `DORMANT_TTL`.
     dormant_since: Option<SystemTime>,
+}
+
+/// Fold a status report into a record, stamping `resumed_at` on a known
+/// non-Playing → Playing transition. A `None` status is a signal that carried
+/// no playback field — it never erases what we knew.
+fn note_playback(rec: &mut SessionRecord, status: Option<&str>, now: SystemTime) {
+    let Some(status) = status else { return };
+    if status == "Playing" && rec.playback.as_deref().is_some_and(|p| p != "Playing") {
+        rec.resumed_at = Some(now);
+    }
+    rec.playback = Some(status.to_string());
 }
 
 /// (browser PID, identity key) → learned session.
@@ -191,6 +210,7 @@ pub fn snapshot(pids: &HashSet<u32>) -> SessionSnapshot {
                 title: rec.title.clone(),
                 artist: rec.artist.clone(),
                 last_active: rec.last_active,
+                resumed_at: rec.resumed_at,
             })
             .collect(),
     )
@@ -513,8 +533,10 @@ fn bump_session(pid: u32, key: &str) {
         let Some(rec) = sessions.get_mut(&(pid, key.to_string())) else {
             return;
         };
-        rec.last_active = SystemTime::now();
+        let now = SystemTime::now();
+        rec.last_active = now;
         rec.dormant_since = None;
+        note_playback(rec, Some("Playing"), now);
     }
     println!("MPRIS-WATCH playing: pid={pid} {key}");
     crate::audio::pulse::pulse_monitor::request_refresh();
@@ -578,6 +600,7 @@ fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
             rec.artist = fields.artist.or(rec.artist.take());
             rec.last_active = now;
             rec.dormant_since = None;
+            note_playback(rec, fields.playback.as_deref(), now);
             println!(
                 "[{}] MPRIS-WATCH session bumped: pid={pid} {key} playback={:?}",
                 crate::utils::log_ts(now),
@@ -604,6 +627,8 @@ fn record_update(pid: u32, fields: MetaFields) -> Option<String> {
                 artist: fields.artist,
                 art,
                 last_active: now,
+                playback: fields.playback,
+                resumed_at: None,
                 dormant_since: None,
             });
         }
@@ -695,6 +720,8 @@ mod tests {
                 artist: None,
                 art: Some(Arc::new(vec![0u8; 2048])),
                 last_active: SystemTime::now(),
+                playback: None,
+                resumed_at: None,
                 dormant_since: None,
             },
         );
