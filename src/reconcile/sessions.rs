@@ -51,6 +51,14 @@ pub fn twitch_login_from_media_name(media_name: &str) -> Option<String> {
         .then_some(login)
 }
 
+/// Identities whose sink-inputs are named by the tab's own stable title
+/// (generic web pages) rather than by Media Session metadata. These are never
+/// subject to Firefox's active-session naming lie — their streams always
+/// arrive self-identifying and re-claim by name, never through recovery.
+fn tab_titled(key: &str) -> bool {
+    key.starts_with("web:")
+}
+
 impl SessionSnapshot {
     pub fn new(rows: Vec<SessionRow>) -> Self {
         Self { rows }
@@ -144,6 +152,19 @@ impl SessionSnapshot {
     /// until the TTL drains (observed 2026-08-25: back to zackrawrr after
     /// surfing esfandtv/avoidingthepuddle/cinna — "AudioStream" for 10 min
     /// while the session table reported zackrawrr resuming and playing).
+    ///
+    /// And a TAB-TITLED (`web:`) departure never blocks: its sink-inputs
+    /// arrive wearing the tab's own stable title even while another session
+    /// is active, and always re-claim by name — so a returning `web:` stream
+    /// can never be the misnamed stream being identified, and its departure
+    /// is no competing explanation. It neither counts toward the
+    /// two-departure ambiguity nor stands in for "the unmute" as the floor
+    /// (it still marks its own record as a possible ghost). Observed
+    /// 2026-08-29 04:51: a dead r/LivestreamFail clip's departure plus
+    /// agent00's own made two unclaimed departures, so agent00's returning
+    /// stream sat "AudioStream" for ~50s until another clip happened to
+    /// re-claim the reddit identity — and every clip played while scrolling
+    /// refreshes such a departure, extending the block up to the full TTL.
     pub fn recover_recent_identity(
         &self,
         pid: u32,
@@ -152,7 +173,14 @@ impl SessionSnapshot {
         now: SystemTime,
     ) -> Option<String> {
         let newest_on_pid = self.on_pid(pid).map(|r| r.last_active).max()?;
-        let latest_departure = departed.values().max().copied();
+        // Only misnamable departures set the floor and the ambiguity count;
+        // the full set still feeds the ghost check below.
+        let misnamable: Vec<SystemTime> = departed
+            .iter()
+            .filter(|(k, _)| !tab_titled(k))
+            .map(|(_, at)| *at)
+            .collect();
+        let latest_departure = misnamable.iter().max().copied();
         self.on_pid(pid)
             .filter(|r| !worn.contains(&r.key))
             .max_by_key(|r| r.last_active)
@@ -166,7 +194,7 @@ impl SessionSnapshot {
                     .resumed_at
                     .map_or(false, |t| latest_departure.map_or(true, |d| t > d));
                 let is_departed = departed.contains_key(r.key.as_str());
-                let attributable = !is_departed || departed.len() < 2 || resumed_after;
+                let attributable = !is_departed || misnamable.len() < 2 || resumed_after;
                 after_departures
                     && attributable
                     && (fresh
@@ -381,6 +409,58 @@ mod tests {
         assert_eq!(
             SessionSnapshot::new(vec![zack])
                 .recover_recent_identity(pid, &HashSet::new(), &departed, now),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_titled_departure_never_blocks_attribution() {
+        // 2026-08-29 04:51: agent00's stream churned while a dead LSF clip's
+        // departure sat unclaimed — two unclaimed departures, so the
+        // multi-departure rule refused agent00's fresh bump for ~50s. A web:
+        // departure's return always self-identifies by name, so it is no
+        // competing explanation for a generic stream.
+        let pid = 1;
+        let now = SystemTime::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        let snap = SessionSnapshot::new(vec![row(pid, "ttv:agent00", "Jungle Day 1", ago(1))]);
+        let departed: HashMap<String, SystemTime> = [
+            (String::from("web:reddit.com:r/livestreamfail"), ago(74)),
+            (String::from("ttv:agent00"), ago(71)),
+        ]
+        .into();
+        assert_eq!(
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now)
+                .as_deref(),
+            Some("ttv:agent00")
+        );
+
+        // Nor does a web: departure set the floor: a session bumped after the
+        // ttv departure but before a LATER clip death still attributes.
+        let snap = SessionSnapshot::new(vec![row(pid, "ttv:agent00", "Jungle Day 1", ago(5))]);
+        let departed: HashMap<String, SystemTime> = [
+            (String::from("web:reddit.com:r/livestreamfail"), ago(1)),
+            (String::from("ttv:agent00"), ago(71)),
+        ]
+        .into();
+        assert_eq!(
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now)
+                .as_deref(),
+            Some("ttv:agent00")
+        );
+
+        // The ghost rule is untouched: a stale record whose own web: identity
+        // departed (closed reddit tab) is still refused.
+        let snap = SessionSnapshot::new(vec![row(
+            pid,
+            "web:reddit.com:r/livestreamfail",
+            "r/LivestreamFail",
+            ago(120),
+        )]);
+        let departed: HashMap<String, SystemTime> =
+            [(String::from("web:reddit.com:r/livestreamfail"), ago(60))].into();
+        assert_eq!(
+            snap.recover_recent_identity(pid, &HashSet::new(), &departed, now),
             None
         );
     }

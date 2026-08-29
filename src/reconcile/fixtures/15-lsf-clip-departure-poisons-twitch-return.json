@@ -1,0 +1,56 @@
+{
+  "name": "15 dead LSF clip departure poisons a returning twitch stream (2026-08-29 04:51): a reddit clip played while watching agent00, died, then all streams churned; agent00's return counted TWO unclaimed departures (its own + the clip's) and the multi-departure rule refused its fresh session bump for ~50s. A web: departure is tab-titled — its return always self-identifies by name — so it must not count toward the ambiguity",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL DAY 1","artist":"Agent00","active_ms":0} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Agent00 - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:agent00","name":"Agent00 - Twitch"} ] },
+
+    { "at_ms": 14000,
+      "sessions": [
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL DAY 1","artist":"Agent00","active_ms":0},
+        {"pid":1,"key":"web:reddit.com:r/livestreamfail","title":"r/LivestreamFail","active_ms":13900} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"Agent00 - Twitch"},
+                  {"uid":11,"pid":1,"name":"r/LivestreamFail"} ],
+      "expect": [ {"uid":10,"identity":"ttv:agent00"},
+                  {"uid":11,"identity":"web:reddit.com:r/livestreamfail"} ] },
+
+    { "at_ms": 29000,
+      "apps":   [ {"uid":10,"pid":1,"name":"Agent00 - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:agent00"} ] },
+
+    { "at_ms": 32000, "apps": [], "expect": [] },
+
+    { "at_ms": 34500,
+      "sessions": [
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL DAY 1","artist":"Agent00","active_ms":0},
+        {"pid":1,"key":"web:reddit.com:r/livestreamfail","title":"r/LivestreamFail","active_ms":13900},
+        {"pid":1,"key":"ttv:willneff","title":"la creatura","artist":"willneff","active_ms":33900} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:willneff","name":"willneff - Twitch"} ] },
+
+    { "at_ms": 43000,
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"},
+                  {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:willneff"},
+                  {"uid":13,"identity":null} ],
+      "expect_poll": true },
+
+    { "at_ms": 43600,
+      "sessions": [
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL DAY 1","artist":"Agent00","active_ms":43500},
+        {"pid":1,"key":"web:reddit.com:r/livestreamfail","title":"r/LivestreamFail","active_ms":13900},
+        {"pid":1,"key":"ttv:willneff","title":"la creatura","artist":"willneff","active_ms":33900} ],
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"},
+                  {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:willneff"},
+                  {"uid":13,"identity":"ttv:agent00","name":"Agent00 - Twitch"} ] },
+
+    { "at_ms": 44200,
+      "apps":   [ {"uid":12,"pid":1,"name":"AudioStream"},
+                  {"uid":14,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":12,"identity":"ttv:willneff"},
+                  {"uid":14,"identity":"ttv:agent00"} ] }
+  ]
+}
