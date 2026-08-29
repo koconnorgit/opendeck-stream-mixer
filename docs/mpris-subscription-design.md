@@ -237,6 +237,21 @@ The user-facing display name comes from the identity when we have one
 (`artist` for Twitch, `title` for YouTube, slug handle for Kick — reusing
 `kick::display_name` semantics), else the current name pipeline unchanged.
 
+**Provisional adoption (2026-08-29).** A recovery via the departure trail
+alone (instant or sole tier) is an inference, and it races the browser's own
+answer: on a streamer switch, Firefox emits the new tab's Media Session
+~0.5-1s *after* its sink-input appears (observed 450ms and 700ms), so the
+trail hands the new stream the dead tab's identity — and the wrong identity
+then re-seeds the departure table on every stream churn, laundering itself
+forever. Trail adoptions therefore stay label-visible but *provisional* for
+`RECOVERY_PROVISIONAL` (2s), remembering the departure that seeded them as a
+floor. A fresh (≤ `RECOVERY_WINDOW`), unworn, never-departed session signal
+newer than that floor is the late answer and corrects the channel in place;
+the stream naming its own identity, or a quiet window, confirms the pick.
+Departed sessions are excluded from correcting because a departed session
+bumping right after an unmute is Firefox's main-controller echo, not the new
+stream's voice (the mizkif swap). Fixture 16 replays the incident.
+
 ## Mixer changes
 
 `MixerChannel` diff:

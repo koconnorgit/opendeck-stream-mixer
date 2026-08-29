@@ -1,0 +1,51 @@
+{
+  "name": "16 agent00→ariathome switch (2026-08-29 16:24/16:38 UTC): the new tab's Media Session lands ~0.5s AFTER its sink-input, so the departure trail decides first and hands the stream the DEAD tab's identity — then re-launders it through the departure table on every churn. A trail adoption is provisional for RECOVERY_PROVISIONAL; the late session signal corrects it.",
+  "steps": [
+    { "at_ms": 0,
+      "sessions": [
+        {"pid":1,"key":"ttv:esfandtv","title":"Day 4 GamesCom","artist":"EsfandTV","active_ms":0},
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL","artist":"Agent00","active_ms":8000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"}, {"uid":11,"pid":1,"name":"Agent00 - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"}, {"uid":11,"identity":"ttv:agent00"} ] },
+
+    { "at_ms": 58000,
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"} ] },
+
+    { "at_ms": 87000,
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"}, {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"},
+                  {"uid":12,"identity":"ttv:agent00","name":"Agent00 - Twitch"} ] },
+
+    { "at_ms": 87700,
+      "sessions": [
+        {"pid":1,"key":"ttv:esfandtv","title":"Day 4 GamesCom","artist":"EsfandTV","active_ms":0},
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL","artist":"Agent00","active_ms":8000},
+        {"pid":1,"key":"ttv:ariathome","title":"SUMMER SENDOFF | IRL IMPROV","artist":"ARIatHOME","active_ms":87700} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"}, {"uid":12,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"},
+                  {"uid":12,"identity":"ttv:ariathome","name":"ARIatHOME - Twitch"} ] },
+
+    { "at_ms": 880000,
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"} ] },
+
+    { "at_ms": 881500,
+      "sessions": [
+        {"pid":1,"key":"ttv:esfandtv","title":"Day 4 GamesCom","artist":"EsfandTV","active_ms":881400,"resumed_ms":881400},
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL","artist":"Agent00","active_ms":8000},
+        {"pid":1,"key":"ttv:ariathome","title":"SUMMER SENDOFF | IRL IMPROV","artist":"ARIatHOME","active_ms":87700} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"}, {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"},
+                  {"uid":13,"identity":"ttv:ariathome","name":"ARIatHOME - Twitch"} ] },
+
+    { "at_ms": 882100,
+      "sessions": [
+        {"pid":1,"key":"ttv:esfandtv","title":"Day 4 GamesCom","artist":"EsfandTV","active_ms":881400,"resumed_ms":881400},
+        {"pid":1,"key":"ttv:agent00","title":"AMAZON JUNGLE SURVIVAL","artist":"Agent00","active_ms":8000},
+        {"pid":1,"key":"ttv:ariathome","title":"SUMMER SENDOFF | IRL IMPROV","artist":"ARIatHOME","active_ms":882000} ],
+      "apps":   [ {"uid":10,"pid":1,"name":"EsfandTV - Twitch"}, {"uid":13,"pid":1,"name":"AudioStream"} ],
+      "expect": [ {"uid":10,"identity":"ttv:esfandtv"},
+                  {"uid":13,"identity":"ttv:ariathome"} ] }
+  ]
+}

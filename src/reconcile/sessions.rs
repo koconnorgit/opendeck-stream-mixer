@@ -204,6 +204,33 @@ impl SessionSnapshot {
             .map(|r| r.key.clone())
     }
 
+    /// The freshest unworn session that signaled strictly after `floor`,
+    /// provided the signal is recent (`RECOVERY_WINDOW`). This is the
+    /// provisional-recovery corrector's question: after a departure-trail
+    /// adoption, a session that signals between the departure and now is the
+    /// browser naming what actually started playing — evidence that outranks
+    /// the trail's inference. The freshness bound keeps a stale record that
+    /// merely postdates an old departure (a title change during a long mute)
+    /// from masquerading as that signal.
+    pub fn fresh_signal_since(
+        &self,
+        pid: u32,
+        worn: &HashSet<String>,
+        floor: SystemTime,
+        now: SystemTime,
+    ) -> Option<String> {
+        self.on_pid(pid)
+            .filter(|r| !worn.contains(&r.key))
+            .filter(|r| r.last_active > floor)
+            .filter(|r| {
+                now.duration_since(r.last_active)
+                    .map(|age| age < RECOVERY_WINDOW)
+                    .unwrap_or(true)
+            })
+            .max_by_key(|r| r.last_active)
+            .map(|r| r.key.clone())
+    }
+
     /// The PID's newest session key, when it is strictly newer than `key`'s
     /// own record (or `key` has no record at all). `None` when `key` IS the
     /// PID's current active session, or when the table knows nothing about

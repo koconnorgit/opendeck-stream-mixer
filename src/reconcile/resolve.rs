@@ -19,8 +19,17 @@ use std::time::SystemTime;
 /// What the evidence supports.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Resolution {
-    /// Wear `key`, labelled `name`.
-    Adopt { key: String, name: String },
+    /// Wear `key`, labelled `name`. `floor` is set when the identity came
+    /// from the departure trail alone (the time of the departure that seeded
+    /// it): such an adoption is an inference, not a signal, and rides a short
+    /// provisional window during which a fresh session signal newer than the
+    /// floor may correct it. Session-backed and name-backed adoptions carry
+    /// no floor — the browser itself named them.
+    Adopt {
+        key: String,
+        name: String,
+        floor: Option<SystemTime>,
+    },
     /// The claim is plausible but ambiguous for now; the caller should ask
     /// for a confirming refresh after the claim window.
     Defer,
@@ -48,6 +57,7 @@ pub(super) fn recover_untrusted(
     let now = ctx.now;
     let recovered = state
         .recover_departed_identity(pid, &ctx.recovery_worn, ctx.sessions, now)
+        .map(|(key, departed_at)| (key, Some(departed_at)))
         .or_else(|| {
             // Only departures nobody wears count as unclaimed.
             let unclaimed: std::collections::HashMap<String, SystemTime> = state
@@ -57,17 +67,46 @@ pub(super) fn recover_untrusted(
                 .collect();
             ctx.sessions
                 .recover_recent_identity(pid, &ctx.recovery_worn, &unclaimed, now)
+                .map(|key| (key, None))
         });
     match recovered {
-        Some(key) => {
+        Some((key, floor)) => {
             let name = ctx
                 .sessions
                 .display_name_for(pid, &key)
                 .unwrap_or_else(|| fallback_name.to_string());
-            Resolution::Adopt { key, name }
+            Resolution::Adopt { key, name, floor }
         }
         None => Resolution::Refuse,
     }
+}
+
+/// Whether a fresh session signal contradicts a provisional (departure-trail)
+/// identity: the freshest unworn session that signaled after `floor` — the
+/// departure the trail pick was seeded from — names what the browser actually
+/// started playing (the streamer-switch race: that signal lands ~0.5-1s after
+/// the sink-input it describes). A DEPARTED session signaling now is excluded:
+/// that is Firefox's main-controller echo after an unmute (the mizkif case),
+/// not the new stream's own voice.
+pub(super) fn provisional_correction(
+    pid: Option<u32>,
+    floor: SystemTime,
+    ctx: &Ctx<'_>,
+    state: &IdentityState,
+) -> Option<(String, String)> {
+    let pid = pid?;
+    let now = ctx.now;
+    let key = ctx
+        .sessions
+        .fresh_signal_since(pid, &ctx.recovery_worn, floor, now)?;
+    if state.departed_for(pid, now).contains_key(&key) {
+        return None;
+    }
+    let name = ctx
+        .sessions
+        .display_name_for(pid, &key)
+        .unwrap_or_else(|| key.clone());
+    Some((key, name))
 }
 
 /// A stream reports a name that resolves to `key`. Adopt it — unless that
@@ -90,6 +129,7 @@ pub(super) fn claim_reported(
         return Resolution::Adopt {
             key,
             name: raw.to_string(),
+            floor: None,
         };
     }
     let confirmed = pid
@@ -100,6 +140,7 @@ pub(super) fn claim_reported(
         Resolution::Adopt {
             key,
             name: raw.to_string(),
+            floor: None,
         }
     } else {
         Resolution::Defer

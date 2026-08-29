@@ -43,8 +43,28 @@ pub struct MixerChannel {
     /// playing, and only time separates that lie from a genuine same-tab
     /// navigation: the lie's real owner shows up seconds later and collides.
     pub pending_name_shift: Option<(String, SystemTime)>,
+    /// Set when the identity came from the departure trail alone — no session
+    /// signal named this stream, the trail was merely the best inference. The
+    /// adoption stands, but until `until` a fresh session signal newer than
+    /// `floor` may correct it: on a streamer switch Firefox emits the new
+    /// tab's Media Session ~0.5-1s AFTER its sink-input, so trail-based
+    /// recovery decides before the real answer arrives (observed 2026-08-29:
+    /// agent00→ariathome handed the new stream the dead tab's identity, then
+    /// re-laundered it through the departure table on every churn).
+    pub provisional: Option<ProvisionalRecovery>,
     pub is_device: bool,
     pub is_multi_sink_app: bool,
+}
+
+/// The correction window riding a departure-trail identity adoption.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProvisionalRecovery {
+    /// When the window closes; silence until then confirms the adoption.
+    pub until: SystemTime,
+    /// The departure that seeded the pick. Only a session signal strictly
+    /// newer than it describes what replaced the departed stream — anything
+    /// older predates the churn and says nothing about the new stream.
+    pub floor: SystemTime,
 }
 
 impl MixerChannel {

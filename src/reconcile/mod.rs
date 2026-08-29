@@ -15,8 +15,8 @@ mod resolve;
 pub mod sessions;
 
 use crate::audio::audio_system::AppInfo;
-use crate::mixer::MixerChannel;
-use resolve::{claim_reported, recover_untrusted, Resolution};
+use crate::mixer::{MixerChannel, ProvisionalRecovery};
+use resolve::{claim_reported, provisional_correction, recover_untrusted, Resolution};
 use sessions::SessionSnapshot;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
@@ -31,6 +31,14 @@ pub const DEPARTED_TTL: Duration = Duration::from_secs(600);
 /// departure belonging to the stream being built right now" is anything this
 /// recent — not just this exact refresh.
 pub const DEPARTED_INSTANT: Duration = Duration::from_secs(2);
+
+/// How long a departure-trail identity adoption stays correctable. The trail
+/// is an inference; the browser's own answer — the new tab's Media Session
+/// signal — lands ~0.5-1s AFTER the sink-input it describes (observed 450ms
+/// and 700ms on 2026-08-29), so an adoption decided before it must yield to
+/// it. Kept short: past this window a fresh unworn signal is far more likely
+/// to be unrelated (a background tab's metadata) than the race's late answer.
+pub const RECOVERY_PROVISIONAL: Duration = Duration::from_secs(2);
 
 /// How long a cross-identity name shift must persist, uncontested, before it
 /// is believed. Long enough for the title's real owner (the other tab's own
@@ -176,14 +184,15 @@ impl IdentityState {
     /// FRESH departure (the mute that just happened) wins even when stale
     /// departures pollute the table; otherwise a unique candidate overall.
     /// Two fresh departures (two tabs muted at once) are ambiguous — refuse,
-    /// never guess.
+    /// never guess. Returns the pick with its departure time, which becomes
+    /// the provisional-correction floor.
     fn recover_departed_identity(
         &self,
         pid: u32,
         worn: &HashSet<String>,
         sessions: &SessionSnapshot,
         now: SystemTime,
-    ) -> Option<String> {
+    ) -> Option<(String, SystemTime)> {
         let candidates: Vec<(&String, &SystemTime)> = self
             .departed
             .iter()
@@ -212,7 +221,7 @@ impl IdentityState {
             })
             .collect();
         if instant.len() == 1 {
-            let pick = instant[0].0;
+            let (pick, departed_at) = *instant[0];
             // ...unless the session table names DIFFERENT, NEWER content as
             // what the browser is playing and no live stream accounts for it.
             // That is the streamer-switch: the old stream's sink-input dies,
@@ -240,7 +249,7 @@ impl IdentityState {
                 );
                 return None;
             }
-            return Some(pick.clone());
+            return Some((pick.clone(), *departed_at));
         }
 
         // Otherwise only a SOLE candidate is safe. (A wider "uniquely fresh"
@@ -248,7 +257,7 @@ impl IdentityState {
         // seconds apart it handed a returning stream the OTHER stream's
         // departure — the instant tier covers everything it was for.)
         if candidates.len() == 1 {
-            return Some(candidates[0].0.clone());
+            return Some((candidates[0].0.clone(), *candidates[0].1));
         }
         None
     }
@@ -533,6 +542,33 @@ fn reconcile_existing(
     let now = ctx.now;
 
     if prev.identity.is_some() {
+        // A departure-trail identity is provisional: the browser's own signal
+        // for the new stream lands moments after the sink-input, so the trail
+        // decides first and can decide wrong (the streamer-switch race). A
+        // fresh unworn, never-departed session signal newer than the seeding
+        // departure is that late answer — it wins. The stream naming its own
+        // identity, or a quiet window, confirms the trail's pick instead.
+        if let Some(p) = prev.provisional {
+            if raw_identity.is_some() && raw_identity == prev.identity {
+                prev.provisional = None;
+            } else if now >= p.until {
+                prev.provisional = None;
+            } else if let Some((key, name)) = provisional_correction(app.pid, p.floor, ctx, state)
+            {
+                println!(
+                    "Provisional identity {:?} corrected to {:?} ({}) for uid={} — \
+                     session signal outranks the departure trail",
+                    prev.identity, name, key, prev.uid
+                );
+                prev.identity = Some(key);
+                prev.app_name = name;
+                prev.art_data = None;
+                prev.pending_name_shift = None;
+                prev.provisional = None;
+                return prev;
+            }
+        }
+
         if raw_identity == prev.identity {
             // Same content, possibly a different title form (canonical name
             // vs the stream subtitle Firefox keeps reporting). Nothing to do;
@@ -579,7 +615,7 @@ fn reconcile_existing(
         // muted tab's title).
         if ctx.identity_count(&key) <= 1 && !ctx.channel_worn.contains(&key) {
             match claim_reported(app.pid, key, raw, ctx, state) {
-                Resolution::Adopt { key, name } => {
+                Resolution::Adopt { key, name, .. } => {
                     prev.pending_name_shift = None;
                     prev.identity = Some(key);
                     prev.app_name = name;
@@ -600,13 +636,17 @@ fn reconcile_existing(
             // retrying on later refreshes (the watcher queues one when the
             // session lands), or "AudioStream" sticks forever.
             match recover_untrusted(app.pid, &prev.app_name, ctx, state) {
-                Resolution::Adopt { key, name } => {
+                Resolution::Adopt { key, name, floor } => {
                     println!(
                         "Recovered identity {:?} ({}) for generic stream uid={}",
                         name, key, prev.uid
                     );
                     prev.identity = Some(key);
                     prev.app_name = name;
+                    prev.provisional = floor.map(|floor| ProvisionalRecovery {
+                        until: now + RECOVERY_PROVISIONAL,
+                        floor,
+                    });
                 }
                 Resolution::Defer | Resolution::Refuse => {
                     println!(
@@ -654,7 +694,7 @@ fn build_new(
         || ctx.title_collides(app.pid, raw)
         || identity_taken;
 
-    let (identity, app_name) = if untrusted && raw_identity.is_some() {
+    let (identity, app_name, provisional) = if untrusted && raw_identity.is_some() {
         // The stream names a specific identity that another live stream
         // holds (often its own dying husk from the same toggle). Recovering
         // a DIFFERENT identity here would guess against the stream's own
@@ -662,15 +702,19 @@ fn build_new(
         // asmongold's title. Stay identity-less under the reported name; the
         // wearer's death frees the identity within a refresh or two and the
         // ordinary adoption path takes it.
-        (None, raw.clone())
+        (None, raw.clone(), None)
     } else if untrusted {
         match recover_untrusted(app.pid, raw, ctx, state) {
-            Resolution::Adopt { key, name } => {
+            Resolution::Adopt { key, name, floor } => {
                 println!(
                     "Recovered identity {:?} ({}) for new stream uid={} (reported {:?})",
                     name, key, app.uid, raw
                 );
-                (Some(key), name)
+                let provisional = floor.map(|floor| ProvisionalRecovery {
+                    until: ctx.now + RECOVERY_PROVISIONAL,
+                    floor,
+                });
+                (Some(key), name, provisional)
             }
             // No trustworthy identity: keep the reported name (the label may
             // be transiently wrong; the multi-sink label guard and later
@@ -681,20 +725,20 @@ fn build_new(
                     app.uid, raw, ctx.recovery_worn
                 );
                 fx.poll_players = true;
-                (None, raw.clone())
+                (None, raw.clone(), None)
             }
         }
     } else {
         match raw_identity {
             Some(key) => match claim_reported(app.pid, key, raw, ctx, state) {
-                Resolution::Adopt { key, name } => (Some(key), name),
+                Resolution::Adopt { key, name, .. } => (Some(key), name, None),
                 Resolution::Defer => {
                     fx.request_wakeup();
-                    (None, raw.clone())
+                    (None, raw.clone(), None)
                 }
-                Resolution::Refuse => (None, raw.clone()),
+                Resolution::Refuse => (None, raw.clone(), None),
             },
-            None => (None, raw.clone()),
+            None => (None, raw.clone(), None),
         }
     };
 
@@ -717,6 +761,7 @@ fn build_new(
         identity,
         art_data: None,
         pending_name_shift: None,
+        provisional,
         is_device: app.is_device,
         is_multi_sink_app: app.is_multi_sink_app,
     }
@@ -770,6 +815,7 @@ pub(crate) mod test_support {
             identity: None,
             art_data: None,
             pending_name_shift: None,
+            provisional: None,
             is_device: false,
             is_multi_sink_app: multi,
         }
@@ -903,19 +949,19 @@ mod tests {
         st.departed.insert((pid, "kick:b".into()), now);
         // Unique departed identity → adopted.
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &s, now)
+            st.recover_departed_identity(pid, &HashSet::new(), &s, now).map(|(k, _)| k)
                 .as_deref(),
             Some("kick:b")
         );
         // Worn → refused.
         let worn: HashSet<String> = [String::from("kick:b")].into();
-        assert_eq!(st.recover_departed_identity(pid, &worn, &s, now), None);
+        assert_eq!(st.recover_departed_identity(pid, &worn, &s, now).map(|(k, _)| k), None);
         // A departure recorded THIS refresh outranks a merely-fresh one —
         // the same-batch replacement case, even with a ghost around.
         st.departed
             .insert((pid, "yt:ghost".into()), now - Duration::from_secs(5));
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &s, now)
+            st.recover_departed_identity(pid, &HashSet::new(), &s, now).map(|(k, _)| k)
                 .as_deref(),
             Some("kick:b"),
             "same-refresh departure beats a fresh ghost"
@@ -924,20 +970,20 @@ mod tests {
 
         // Two FRESH departures (two tabs muted at once) → ambiguous, refused.
         st.departed.insert((pid, "ttv:c".into()), now);
-        assert_eq!(st.recover_departed_identity(pid, &HashSet::new(), &s, now), None);
+        assert_eq!(st.recover_departed_identity(pid, &HashSet::new(), &s, now).map(|(k, _)| k), None);
         // A stale-but-valid departure (an old tab navigation) must not block
         // adopting the uniquely fresh one — the mute that just happened.
         st.departed
             .insert((pid, "ttv:c".into()), now - Duration::from_secs(60));
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &s, now)
+            st.recover_departed_identity(pid, &HashSet::new(), &s, now).map(|(k, _)| k)
                 .as_deref(),
             Some("kick:b")
         );
         // Expired entries don't count at all.
         st.departed.insert((pid, "ttv:c".into()), now - DEPARTED_TTL);
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &s, now)
+            st.recover_departed_identity(pid, &HashSet::new(), &s, now).map(|(k, _)| k)
                 .as_deref(),
             Some("kick:b")
         );
@@ -962,7 +1008,7 @@ mod tests {
             row(pid, "ttv:soda", "sodapoppin", ago(30)),
         ]);
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now),
+            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now).map(|(k, _)| k),
             None,
             "contradicted guess must be refused, not adopted"
         );
@@ -973,7 +1019,7 @@ mod tests {
             row(pid, "ttv:soda", "sodapoppin", ago(30)),
         ]);
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now)
+            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now).map(|(k, _)| k)
                 .as_deref(),
             Some("ttv:ludwig")
         );
@@ -987,7 +1033,7 @@ mod tests {
             row(pid, "ttv:switched", "Switched", now),
         ]);
         assert_eq!(
-            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now),
+            st.recover_departed_identity(pid, &HashSet::new(), &sessions, now).map(|(k, _)| k),
             None,
             "a fresher unaccounted-for session vetoes the instant tier"
         );
@@ -997,7 +1043,7 @@ mod tests {
         // audible tab holds the active session, the case this tier exists for.
         let worn: HashSet<String> = [String::from("ttv:switched")].into();
         assert_eq!(
-            st.recover_departed_identity(pid, &worn, &sessions, now)
+            st.recover_departed_identity(pid, &worn, &sessions, now).map(|(k, _)| k)
                 .as_deref(),
             Some("ttv:ludwig"),
             "an identity worn by a live stream never vetoes"
