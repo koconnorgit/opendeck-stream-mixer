@@ -1,6 +1,6 @@
 use crate::audio::{AppInfo, AudioSystem};
 use libpulse_binding::callbacks::ListResult;
-use libpulse_binding::volume::ChannelVolumes;
+use libpulse_binding::volume::{ChannelVolumes, Volume};
 use pulsectl::controllers::{AppControl, DeviceControl, SinkController};
 use pulsectl::controllers::types::ApplicationInfo;
 use std::cell::RefCell;
@@ -316,6 +316,33 @@ impl AudioSystem for PulseAudioSystem {
         }
         Ok(())
     }
+
+    fn set_volume(
+        &mut self,
+        app_index: u32,
+        percent: f32,
+        is_device: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        let level = Volume(pulse_volume_from_percentage(percent));
+        if is_device {
+            let device = self.controller.get_device_by_index(app_index)?;
+            let mut volumes = device.volume;
+            volumes.set(volumes.len(), level);
+            self.controller
+                .set_device_volume_by_index(app_index, &volumes);
+        } else {
+            let app = self.controller.get_app_by_index(app_index)?;
+            let mut volumes = app.volume;
+            volumes.set(volumes.len(), level);
+            let op = self
+                .controller
+                .handler
+                .introspect
+                .set_sink_input_volume(app_index, &volumes, None);
+            self.controller.handler.wait_for_operation(op)?;
+        }
+        Ok(())
+    }
 }
 
 fn get_pulse_app_volume_percentage(channel_volumes: &ChannelVolumes) -> f32 {
@@ -333,6 +360,13 @@ fn get_pulse_app_volume_percentage(channel_volumes: &ChannelVolumes) -> f32 {
     let perc = (avg_volume / PA_VOLUME_NORM as f32) * 100.0;
 
     perc.min(100.0)
+}
+
+/// Inverse of [`get_pulse_app_volume_percentage`]: the raw PulseAudio volume
+/// that reads back as `percent` on the plugin's 0-100 scale.
+fn pulse_volume_from_percentage(percent: f32) -> u32 {
+    let clamped = if percent.is_nan() { 0.0 } else { percent.clamp(0.0, 100.0) };
+    (clamped / 100.0 * PA_VOLUME_NORM as f32).round() as u32
 }
 
 #[cfg(test)]
@@ -360,6 +394,20 @@ mod tests {
             wm_class: None,
             window_icon: None,
         }
+    }
+
+    #[test]
+    fn volume_percentage_round_trips_through_raw_pulse_volume() {
+        for pct in [0.0f32, 1.0, 33.0, 50.0, 99.0, 100.0] {
+            let raw = pulse_volume_from_percentage(pct);
+            let mut volumes = ChannelVolumes::default();
+            volumes.set(2, Volume(raw));
+            let back = get_pulse_app_volume_percentage(&volumes);
+            assert!((back - pct).abs() < 0.01, "{pct}% -> {raw} -> {back}%");
+        }
+        assert_eq!(pulse_volume_from_percentage(250.0), PA_VOLUME_NORM, "clamped high");
+        assert_eq!(pulse_volume_from_percentage(-5.0), 0, "clamped low");
+        assert_eq!(pulse_volume_from_percentage(f32::NAN), 0, "NaN is silence, not a panic");
     }
 
     #[test]

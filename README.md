@@ -23,6 +23,7 @@ Take full control of your sound experience with fine-tuned per-app volume manage
 - **Ignore apps**: Exclude specific apps from showing in the volume controller
 - **Encoder/Dial Support** *(fork addition)*: Assign the action to an encoder dial on Stream Deck + / Stream Deck + XL. Rotate to adjust volume, press to mute, and see the app name, icon, and a live volume bar on the encoder's LCD zone.
 - **Touch-to-Mute** *(fork addition)*: Tap the encoder LCD to toggle mute, or long-press to dismiss the stream — requires a touch-enabled OpenDeck build and a [patched `openaction` fork](#patched-openaction-dependency).
+- **Volume Memory** *(fork addition)*: Map any number of keys as volume presets. Hold one to store every source's current volume and mute, tap it to set them all back. See [Volume memory buttons](#volume-memory-buttons-fork-addition).
 
 ## Installation
 
@@ -70,7 +71,7 @@ For a fresh install without the upstream plugin, also copy the plugin assets:
 ```sh
 PLUGIN_DIR=~/.config/opendeck/plugins/com.victormarin.volume-controller.sdPlugin
 mkdir -p "$PLUGIN_DIR"
-cp manifest.json pi.html LICENSE "$PLUGIN_DIR/"
+cp manifest.json pi.html pi-memory.html pi-memory-clear.html LICENSE "$PLUGIN_DIR/"
 cp -r img "$PLUGIN_DIR/"
 cp target/release/oa-volume-controller "$PLUGIN_DIR/oa-volume-controller-x86_64-unknown-linux-gnu"
 ```
@@ -102,6 +103,17 @@ Assign the action directly to an encoder dial on a Stream Deck + or Stream Deck 
 - **Press** the dial to toggle mute
 - **Tap** the LCD to toggle mute, or **long-press** it to dismiss the stream — same as a long press on the keypad icon (requires a touch-enabled OpenDeck build; see [Patched `openaction` dependency](#patched-openaction-dependency))
 - The LCD zone shows the 96×96 app icon on the left, and on the right: the app name on top (scrolls horizontally if long), a horizontal volume bar, and a percent readout below; muting dims the whole zone
+
+### Volume memory buttons *(fork addition)*
+
+Drag the `Volume Memory` action onto any key. Each key is its own preset, so add as many as you like (one per game, one for streaming, one for "everything quiet", …).
+
+- **Hold** the key for 1+ seconds to store the current volume and mute state of every source on the mixer. The key turns green and shows how many sources it holds.
+- **Tap** the key to recall: every stored source that is currently running is set back to its stored volume and mute. Sources that weren't stored are left alone; stored sources that aren't running are skipped. The key flashes a checkmark on success or a warning when there was nothing to store, nothing to recall, or a PulseAudio write failed.
+- The key you last stored or recalled is drawn with a filled green background and reads `loaded`, so you can tell at a glance which preset the mixer was last set to. Using another memory key moves the highlight; clearing a preset drops it. The highlight is not persisted across plugin restarts.
+- The property inspector lets you give the key a label (shown on the key in place of `MEM`), lists what is stored, and can clear the preset.
+
+Recall matches stored entries to live sources by media identity first (a Twitch/YouTube/Kick tab finds its own entry even though every browser tab shares an app name), then by exact app + stream name, then by app alone — so a stored "Spotify at 40%" still applies after the track changes, and a single stored browser level applies to every open tab. Presets live in the key's action settings, so they survive plugin reloads and OpenDeck restarts.
 
 ## ToDo (from upstream)
 

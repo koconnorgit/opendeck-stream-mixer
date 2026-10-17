@@ -623,6 +623,8 @@ pub async fn init() -> OpenActionResult<()> {
     let ignored_apps = SHARED_SETTINGS.lock().await.ignored_apps_list.clone();
     mixer::create_mixer_channels(applications, &ignored_apps).await;
     crate::scroll::sync_scroll_state().await;
+    // Seed the memory buttons' blank/drawn state before any key appears.
+    crate::memory::sync_with_mixer().await;
 
     // Start scroll animation timer for long text
     crate::scroll::start_scroll_timer();
@@ -630,6 +632,8 @@ pub async fn init() -> OpenActionResult<()> {
     // Register global event handler and action
     set_global_event_handler(&GlobalHandler);
     register_action(VolumeControllerAction).await;
+    register_action(crate::memory::VolumeMemoryAction).await;
+    register_action(crate::memory::ClearMemoryAction).await;
 
     run(std::env::args().collect()).await
 }

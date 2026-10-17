@@ -706,3 +706,143 @@ pub fn get_encoder_lcd_data_uri(icon_data_uri: &str, title: &str, vol_percent: f
     img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)?;
     Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(&buf)))
 }
+
+/// Render a 144x144 keypad image for a volume-memory button: the button's
+/// label on top and its state ("empty" or how many sources it holds) below,
+/// inside a rounded border that turns green once a snapshot is stored. The
+/// `loaded` preset (last stored or recalled) gets a filled green background
+/// and a thicker border so it stands out from its siblings at a glance.
+pub fn get_memory_button_data_uri(
+    label: &str,
+    stored_sources: Option<usize>,
+    loaded: bool,
+) -> Result<String> {
+    const SIZE: u32 = 144;
+    const BORDER_RADIUS: u32 = 18;
+    const BORDER_THICKNESS: u32 = 4;
+    const LABEL_Y: u32 = 34;
+    const LABEL_SIZE: f32 = 32.0;
+    const STATUS_Y: u32 = 84;
+    const STATUS_SIZE: f32 = 22.0;
+    const TEXT_PAD: u32 = 10;
+
+    let stored = Rgba([80, 200, 120, 255]);
+    let empty = Rgba([120, 120, 120, 255]);
+    let loaded = loaded && stored_sources.is_some();
+
+    let (background, accent, status_color, border_thickness) = if loaded {
+        (
+            Rgba([22, 78, 46, 255]),
+            Rgba([140, 240, 180, 255]),
+            Rgba([255, 255, 255, 255]),
+            BORDER_THICKNESS + 2,
+        )
+    } else if stored_sources.is_some() {
+        (Rgba([18, 18, 18, 255]), stored, stored, BORDER_THICKNESS)
+    } else {
+        (Rgba([18, 18, 18, 255]), empty, empty, BORDER_THICKNESS)
+    };
+
+    let mut img = RgbaImage::from_pixel(SIZE, SIZE, background);
+
+    let label_color = Rgba([235, 235, 235, 255]);
+    draw_text_centered(&mut img, label, TEXT_PAD, LABEL_Y, SIZE - TEXT_PAD * 2, LABEL_SIZE, label_color);
+
+    let status = match (loaded, stored_sources) {
+        (true, _) => "loaded".to_string(),
+        (false, Some(1)) => "1 source".to_string(),
+        (false, Some(n)) => format!("{n} sources"),
+        (false, None) => "empty".to_string(),
+    };
+    draw_text_centered(&mut img, &status, TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, status_color);
+
+    draw_volume_bar_outline(&mut img, 0, 0, SIZE, SIZE, BORDER_RADIUS, accent, border_thickness);
+    clip_rounded_corners(&mut img, BORDER_RADIUS);
+    png_data_uri(&img)
+}
+
+/// Render a 144x144 keypad image for the "clear memory" button. `target` is
+/// the label of the preset currently loaded (the one a press would erase);
+/// `None` draws the key inert because nothing is loaded.
+pub fn get_clear_button_data_uri(target: Option<&str>) -> Result<String> {
+    const SIZE: u32 = 144;
+    const BORDER_RADIUS: u32 = 18;
+    const BORDER_THICKNESS: u32 = 4;
+    const LABEL_Y: u32 = 34;
+    const LABEL_SIZE: f32 = 32.0;
+    const STATUS_Y: u32 = 84;
+    const STATUS_SIZE: f32 = 22.0;
+    const TEXT_PAD: u32 = 10;
+
+    let armed = Rgba([235, 95, 95, 255]);
+    let idle = Rgba([120, 120, 120, 255]);
+    let accent = if target.is_some() { armed } else { idle };
+
+    let mut img = RgbaImage::from_pixel(SIZE, SIZE, Rgba([18, 18, 18, 255]));
+    let label_color = Rgba([235, 235, 235, 255]);
+    draw_text_centered(&mut img, "CLEAR", TEXT_PAD, LABEL_Y, SIZE - TEXT_PAD * 2, LABEL_SIZE, label_color);
+    let status = target.unwrap_or("nothing");
+    draw_text_centered(&mut img, status, TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, accent);
+    draw_volume_bar_outline(&mut img, 0, 0, SIZE, SIZE, BORDER_RADIUS, accent, BORDER_THICKNESS);
+    clip_rounded_corners(&mut img, BORDER_RADIUS);
+    png_data_uri(&img)
+}
+
+/// Make everything outside a full-canvas rounded rectangle transparent, with
+/// antialiased edges.
+fn clip_rounded_corners(img: &mut RgbaImage, radius: u32) {
+    let (w, h) = (img.width(), img.height());
+    for y in 0..h {
+        for x in 0..w {
+            let d = volume_bar_distance(
+                x as f32 + 0.5,
+                y as f32 + 0.5,
+                0.0,
+                0.0,
+                w as f32,
+                h as f32,
+                radius as f32,
+            );
+            if d >= 0.5 {
+                img.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            } else if d > -0.5 {
+                let coverage = (0.5 - d).clamp(0.0, 1.0);
+                let px = img.get_pixel(x, y);
+                let new_a = ((px[3] as f32) * coverage) as u8;
+                img.put_pixel(x, y, Rgba([px[0], px[1], px[2], new_a]));
+            }
+        }
+    }
+}
+
+fn png_data_uri(img: &RgbaImage) -> Result<String> {
+    let mut buf = Vec::new();
+    img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)?;
+    Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(&buf)))
+}
+
+#[cfg(test)]
+mod memory_button_tests {
+    #[test]
+    #[ignore = "writes preview PNGs for manual inspection"]
+    fn dump_memory_button_previews() {
+        let dir = std::env::var("MEMORY_PREVIEW_DIR").expect("MEMORY_PREVIEW_DIR");
+        for (name, label, stored, loaded) in [
+            ("empty", "MEM", None, false),
+            ("stored", "Gaming", Some(5usize), false),
+            ("one", "Stream night", Some(1), false),
+            ("loaded", "Gaming", Some(5), true),
+        ] {
+            let uri = super::get_memory_button_data_uri(label, stored, loaded).unwrap();
+            let b64 = uri.split_once(',').unwrap().1;
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
+            std::fs::write(format!("{dir}/memory-{name}.png"), bytes).unwrap();
+        }
+        for (name, target) in [("clear-idle", None), ("clear-armed", Some("Gaming"))] {
+            let uri = super::get_clear_button_data_uri(target).unwrap();
+            let b64 = uri.split_once(',').unwrap().1;
+            let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
+            std::fs::write(format!("{dir}/memory-{name}.png"), bytes).unwrap();
+        }
+    }
+}

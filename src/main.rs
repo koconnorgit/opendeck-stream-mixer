@@ -5,6 +5,7 @@ mod audio;
 mod gfx;
 mod kick;
 mod media_session;
+mod memory;
 mod reconcile;
 mod mixer;
 mod mpris;

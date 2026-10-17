@@ -1,0 +1,217 @@
+<!doctype html>
+<html>
+    <head>
+        <script>
+            function connectOpenActionSocket(
+                inPort,
+                inPropertyInspectorUUID,
+                inRegisterEvent,
+                inInfo,
+                inActionInfo,
+            ) {
+                const websocket = new WebSocket("ws://localhost:" + inPort);
+                inActionInfo = JSON.parse(inActionInfo);
+
+                // The whole settings object lives here so a label edit never
+                // drops the snapshot (and vice versa).
+                let settings = inActionInfo.payload.settings ?? {};
+
+                const labelInput = document.getElementById("label");
+                const savedAt = document.getElementById("saved_at");
+                const list = document.getElementById("snapshot_list");
+                const clearBtn = document.getElementById("clear_btn");
+
+                const render = () => {
+                    labelInput.value = settings.label ?? "";
+                    const snap = settings.snapshot;
+                    list.innerHTML = "";
+                    if (!snap || !Array.isArray(snap.entries) || snap.entries.length === 0) {
+                        savedAt.textContent = "Nothing stored yet";
+                        list.innerHTML =
+                            '<div class="hint">Hold the button for 1+ seconds to store the current volumes.</div>';
+                        clearBtn.disabled = true;
+                        return;
+                    }
+                    clearBtn.disabled = false;
+                    const when = snap.saved_at ? new Date(snap.saved_at * 1000) : null;
+                    savedAt.textContent = when
+                        ? "Stored " + when.toLocaleString()
+                        : "Stored";
+                    for (const e of snap.entries) {
+                        const row = document.createElement("div");
+                        row.className = "entry";
+                        const name = document.createElement("span");
+                        name.className = "name";
+                        name.textContent = e.app_name || e.app_id || "?";
+                        name.title = e.identity ? e.app_id + " · " + e.identity : e.app_id || "";
+                        const level = document.createElement("span");
+                        level.className = "level" + (e.mute ? " muted" : "");
+                        level.textContent =
+                            Math.round(e.vol_percent ?? 0) + "%" + (e.mute ? " muted" : "");
+                        row.appendChild(name);
+                        row.appendChild(level);
+                        list.appendChild(row);
+                    }
+                };
+
+                const save = () => {
+                    websocket.send(
+                        JSON.stringify({
+                            event: "setSettings",
+                            context: inActionInfo.context,
+                            payload: settings,
+                        }),
+                    );
+                };
+
+                websocket.onopen = () => {
+                    websocket.send(
+                        JSON.stringify({
+                            event: inRegisterEvent,
+                            uuid: inPropertyInspectorUUID,
+                        }),
+                    );
+                    // Pull the latest settings; a store may have happened
+                    // since the action info was captured.
+                    websocket.send(
+                        JSON.stringify({
+                            event: "getSettings",
+                            context: inActionInfo.context,
+                        }),
+                    );
+                };
+
+                websocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.event == "didReceiveSettings") {
+                        settings = data.payload.settings ?? {};
+                        render();
+                    }
+                };
+
+                labelInput.addEventListener("change", () => {
+                    settings.label = labelInput.value;
+                    save();
+                });
+
+                clearBtn.addEventListener("click", () => {
+                    settings.snapshot = null;
+                    render();
+                    save();
+                });
+
+                render();
+            }
+
+            const connectElgatoStreamDeckSocket = connectOpenActionSocket;
+        </script>
+        <style>
+            * {
+                font-family: system-ui, sans-serif;
+                font-size: 16px;
+                color: oklch(92.2% 0 0);
+            }
+
+            body {
+                margin: 16px;
+                background-color: oklch(20.5% 0 0);
+            }
+
+            .section {
+                margin-bottom: 20px;
+            }
+
+            .section-title {
+                font-weight: bold;
+                margin-bottom: 8px;
+            }
+
+            .hint {
+                color: oklch(70% 0 0);
+                font-size: 14px;
+                margin-bottom: 8px;
+            }
+
+            input[type="text"] {
+                width: 100%;
+                box-sizing: border-box;
+                padding: 8px 10px;
+                background-color: oklch(25% 0 0);
+                border: 1px solid oklch(35% 0 0);
+                border-radius: 4px;
+            }
+
+            #saved_at {
+                color: oklch(70% 0 0);
+                font-size: 14px;
+                margin-bottom: 8px;
+            }
+
+            .entry {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 8px 12px;
+                margin-bottom: 4px;
+                background-color: oklch(25% 0 0);
+                border-radius: 4px;
+                gap: 12px;
+            }
+
+            .entry .name {
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .entry .level {
+                font-variant-numeric: tabular-nums;
+                color: oklch(80% 0.15 150);
+                white-space: nowrap;
+            }
+
+            .entry .level.muted {
+                color: oklch(60% 0 0);
+            }
+
+            #clear_btn {
+                margin-top: 8px;
+                padding: 8px 14px;
+                background-color: transparent;
+                color: oklch(70% 0.15 20);
+                border: 1px solid oklch(50% 0.1 20);
+                border-radius: 4px;
+                cursor: pointer;
+            }
+
+            #clear_btn:hover:not(:disabled) {
+                background-color: oklch(50% 0.2 20);
+                color: white;
+            }
+
+            #clear_btn:disabled {
+                opacity: 0.4;
+                cursor: default;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="section">
+            <div class="section-title">Button label</div>
+            <div class="hint">Shown on the key. Leave blank for "MEM".</div>
+            <input id="label" type="text" maxlength="12" placeholder="MEM" />
+        </div>
+
+        <div class="section">
+            <div class="section-title">Stored volumes</div>
+            <div class="hint">
+                Hold the key for 1+ seconds to store every source's current
+                volume and mute. Tap it to set them back.
+            </div>
+            <div id="saved_at"></div>
+            <div id="snapshot_list"></div>
+            <button id="clear_btn">Clear stored volumes</button>
+        </div>
+    </body>
+</html>

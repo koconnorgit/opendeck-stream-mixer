@@ -107,6 +107,8 @@ jobs:
           cp LICENSE "$PLUGIN_DIR/"
           cp README.md "$PLUGIN_DIR/"
           cp pi.html "$PLUGIN_DIR/"
+          cp pi-memory.html "$PLUGIN_DIR/"
+          cp pi-memory-clear.html "$PLUGIN_DIR/"
           cp Cargo.toml "$PLUGIN_DIR/"
           cp Cargo.lock "$PLUGIN_DIR/"
 

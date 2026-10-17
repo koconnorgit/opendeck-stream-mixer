@@ -35,6 +35,28 @@
       "States": [
         {}
       ]
+    },
+    {
+      "Icon": "img/memory",
+      "Name": "Volume Memory",
+      "UUID": "com.victormarin.volume-controller.memory",
+      "Tooltip": "Hold to store every source's volume and mute; tap to recall them",
+      "PropertyInspectorPath": "pi-memory.html",
+      "Controllers": ["Keypad"],
+      "States": [
+        {}
+      ]
+    },
+    {
+      "Icon": "img/memory-clear",
+      "Name": "Clear Volume Memory",
+      "UUID": "com.victormarin.volume-controller.memory-clear",
+      "Tooltip": "Erase the stored volumes of the currently loaded memory preset",
+      "PropertyInspectorPath": "pi-memory-clear.html",
+      "Controllers": ["Keypad"],
+      "States": [
+        {}
+      ]
     }
   ]
 }

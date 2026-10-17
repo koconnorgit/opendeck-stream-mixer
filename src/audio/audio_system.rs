@@ -61,4 +61,13 @@ pub trait AudioSystem {
         mute: bool,
         is_device: bool,
     ) -> Result<(), Box<dyn Error>>;
+    /// Set an absolute volume, on the same 0-100 scale `AppInfo::vol_percent`
+    /// reports, so a stored reading round-trips exactly. Every PulseAudio
+    /// channel of the stream is set to the same level.
+    fn set_volume(
+        &mut self,
+        app_index: u32,
+        percent: f32,
+        is_device: bool,
+    ) -> Result<(), Box<dyn Error>>;
 }

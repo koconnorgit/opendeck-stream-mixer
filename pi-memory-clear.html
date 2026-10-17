@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+    <head>
+        <script>
+            function connectOpenActionSocket(inPort, inPropertyInspectorUUID, inRegisterEvent) {
+                const websocket = new WebSocket("ws://localhost:" + inPort);
+                websocket.onopen = () => {
+                    websocket.send(JSON.stringify({ event: inRegisterEvent, uuid: inPropertyInspectorUUID }));
+                };
+            }
+            const connectElgatoStreamDeckSocket = connectOpenActionSocket;
+        </script>
+        <style>
+            * { font-family: system-ui, sans-serif; font-size: 16px; color: oklch(92.2% 0 0); }
+            body { margin: 16px; background-color: oklch(20.5% 0 0); }
+            .section-title { font-weight: bold; margin-bottom: 8px; }
+            .hint { color: oklch(70% 0 0); font-size: 14px; }
+        </style>
+    </head>
+    <body>
+        <div class="section-title">Clear Volume Memory</div>
+        <div class="hint">
+            Press to erase the stored volumes of the memory preset that is
+            currently loaded (the highlighted Volume Memory key). The preset's
+            label is kept. The key shows which preset it would clear, or
+            "nothing" when no preset is loaded.
+        </div>
+    </body>
+</html>

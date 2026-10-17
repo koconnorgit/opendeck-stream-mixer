@@ -302,6 +302,7 @@ pub async fn refresh_audio_applications() -> Result<(), Box<dyn std::error::Erro
     mixer::update_mixer_channels(applications, &ignored_apps).await;
     crate::scroll::sync_scroll_state().await;
     utils::update_stream_deck_buttons().await;
+    crate::memory::sync_with_mixer().await;
 
     Ok(())
 }
