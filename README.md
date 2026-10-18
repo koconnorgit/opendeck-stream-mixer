@@ -108,10 +108,12 @@ Assign the action directly to an encoder dial on a Stream Deck + or Stream Deck 
 
 Drag the `Volume Memory` action onto any key. Each key is its own preset, so add as many as you like (one per game, one for streaming, one for "everything quiet", …).
 
-- **Hold** the key for 1+ seconds to store the current volume and mute state of every source on the mixer. The key turns green and shows how many sources it holds.
+- **Hold** the key for 1 second to store the current volume and mute state of every source on the mixer. The key flashes bright the instant the hold is long enough, while your finger is still on it, so you know the preset is saved. It then turns green and shows how many sources it holds.
 - **Tap** the key to recall: every stored source that is currently running is set back to its stored volume and mute. Sources that weren't stored are left alone; stored sources that aren't running are skipped. The key flashes a checkmark on success or a warning when there was nothing to store, nothing to recall, or a PulseAudio write failed.
 - The key you last stored or recalled is drawn with a filled green background and reads `loaded`, so you can tell at a glance which preset the mixer was last set to. Using another memory key moves the highlight; clearing a preset drops it. The highlight is not persisted across plugin restarts.
-- The property inspector lets you give the key a label (shown on the key in place of `MEM`), lists what is stored, and can clear the preset.
+- Each key shows a speaker icon over its name. Unlabelled keys are named `Preset 1`, `Preset 2`, … by their position on the deck (reading order: top row left to right, then the next row), not by when they were added, so the numbering stays tidy when keys are moved or removed.
+- The property inspector lets you give the key a label (shown in place of `Preset N`), lists what is stored, and can clear the preset.
+- To clear a preset from the deck, add the `Clear Preset` action to a key. Press it once to arm: it turns red and reads `Tap the button to clear it`, and every memory key holding a preset is washed in red. Tap the memory key you want to erase; its stored volumes go and its label stays. Press the clear key again, or wait 10 seconds, to cancel. **Hold** the clear key for 3 seconds to erase every preset on the deck at once; it flashes `ALL cleared`.
 
 Recall matches stored entries to live sources by media identity first (a Twitch/YouTube/Kick tab finds its own entry even though every browser tab shares an app name), then by exact app + stream name, then by app alone — so a stored "Spotify at 40%" still applies after the track changes, and a single stored browser level applies to every open tab. Presets live in the key's action settings, so they survive plugin reloads and OpenDeck restarts.
 

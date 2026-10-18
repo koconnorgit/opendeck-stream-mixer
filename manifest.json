@@ -49,7 +49,7 @@
     },
     {
       "Icon": "img/memory-clear",
-      "Name": "Clear Volume Memory",
+      "Name": "Clear Preset",
       "UUID": "com.victormarin.volume-controller.memory-clear",
       "Tooltip": "Erase the stored volumes of the currently loaded memory preset",
       "PropertyInspectorPath": "pi-memory-clear.html",

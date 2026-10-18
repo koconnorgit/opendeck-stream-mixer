@@ -712,41 +712,71 @@ pub fn get_encoder_lcd_data_uri(icon_data_uri: &str, title: &str, vol_percent: f
 /// inside a rounded border that turns green once a snapshot is stored. The
 /// `loaded` preset (last stored or recalled) gets a filled green background
 /// and a thicker border so it stands out from its siblings at a glance.
+/// While the clear key is `armed`, every stored button is washed in a red
+/// haze and reads "tap to clear" so the deck shows which keys a tap would
+/// erase. `flash` inverts the face (bright background, dark glyph and
+/// text, reading "saved") for the instant a hold has just stored.
 pub fn get_memory_button_data_uri(
     label: &str,
     stored_sources: Option<usize>,
     loaded: bool,
+    armed: bool,
+    flash: bool,
 ) -> Result<String> {
     const SIZE: u32 = 144;
-    const BORDER_RADIUS: u32 = 18;
-    const BORDER_THICKNESS: u32 = 4;
-    const LABEL_Y: u32 = 34;
-    const LABEL_SIZE: f32 = 32.0;
-    const STATUS_Y: u32 = 84;
-    const STATUS_SIZE: f32 = 22.0;
-    const TEXT_PAD: u32 = 10;
+    const ICON_CY: f32 = 44.0;
+    const ICON_SIZE: f32 = 48.0;
+    const LABEL_Y: u32 = 72;
+    const LABEL_SIZE: f32 = 26.0;
+    const STATUS_Y: u32 = 104;
+    const STATUS_SIZE: f32 = 19.0;
+    const TEXT_PAD: u32 = 14;
 
     let stored = Rgba([80, 200, 120, 255]);
     let empty = Rgba([120, 120, 120, 255]);
+    let danger = Rgba([235, 95, 95, 255]);
     let loaded = loaded && stored_sources.is_some();
+    let armed = armed && stored_sources.is_some();
 
     let (background, accent, status_color, border_thickness) = if loaded {
         (
             Rgba([22, 78, 46, 255]),
             Rgba([140, 240, 180, 255]),
             Rgba([255, 255, 255, 255]),
-            BORDER_THICKNESS + 2,
+            KEY_BORDER_THICKNESS + 2,
         )
     } else if stored_sources.is_some() {
-        (Rgba([18, 18, 18, 255]), stored, stored, BORDER_THICKNESS)
+        (Rgba([18, 18, 18, 255]), stored, stored, KEY_BORDER_THICKNESS)
     } else {
-        (Rgba([18, 18, 18, 255]), empty, empty, BORDER_THICKNESS)
+        (Rgba([18, 18, 18, 255]), empty, empty, KEY_BORDER_THICKNESS)
     };
+
+    if flash {
+        let bright = Rgba([225, 250, 235, 255]);
+        let dark = Rgba([16, 48, 30, 255]);
+        let mut img = RgbaImage::from_pixel(SIZE, SIZE, bright);
+        draw_speaker_glyph(&mut img, SIZE as f32 / 2.0, ICON_CY, ICON_SIZE, dark);
+        draw_text_centered(&mut img, label, TEXT_PAD, LABEL_Y, SIZE - TEXT_PAD * 2, LABEL_SIZE, dark);
+        draw_text_centered(&mut img, "saved", TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, dark);
+        draw_key_frame(&mut img, stored, KEY_BORDER_THICKNESS + 2);
+        return png_data_uri(&img);
+    }
 
     let mut img = RgbaImage::from_pixel(SIZE, SIZE, background);
 
     let label_color = Rgba([235, 235, 235, 255]);
+    draw_speaker_glyph(&mut img, SIZE as f32 / 2.0, ICON_CY, ICON_SIZE, label_color);
     draw_text_centered(&mut img, label, TEXT_PAD, LABEL_Y, SIZE - TEXT_PAD * 2, LABEL_SIZE, label_color);
+
+    if armed {
+        // Wash the whole face (icon and label included) in red, then put the
+        // instruction on top in clean white so it stays readable.
+        haze(&mut img, Rgba([225, 50, 50, 255]), 0.55);
+        let white = Rgba([255, 255, 255, 255]);
+        draw_text_centered(&mut img, "tap to clear", TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, white);
+        draw_key_frame(&mut img, danger, KEY_BORDER_THICKNESS + 2);
+        return png_data_uri(&img);
+    }
 
     let status = match (loaded, stored_sources) {
         (true, _) => "loaded".to_string(),
@@ -756,51 +786,171 @@ pub fn get_memory_button_data_uri(
     };
     draw_text_centered(&mut img, &status, TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, status_color);
 
-    draw_volume_bar_outline(&mut img, 0, 0, SIZE, SIZE, BORDER_RADIUS, accent, border_thickness);
-    clip_rounded_corners(&mut img, BORDER_RADIUS);
+    draw_key_frame(&mut img, accent, border_thickness);
     png_data_uri(&img)
 }
 
-/// Render a 144x144 keypad image for the "clear memory" button. `target` is
-/// the label of the preset currently loaded (the one a press would erase);
-/// `None` draws the key inert because nothing is loaded.
-pub fn get_clear_button_data_uri(target: Option<&str>) -> Result<String> {
+/// Blend `color` over every pixel at `opacity` (0..1), keeping alpha.
+fn haze(img: &mut RgbaImage, color: Rgba<u8>, opacity: f32) {
+    for px in img.pixels_mut() {
+        let a = px[3];
+        let mixed = blend_colors(*px, color, opacity);
+        *px = Rgba([mixed[0], mixed[1], mixed[2], a]);
+    }
+}
+
+/// How far the memory/clear key frame sits in from each image edge. Stream
+/// Deck bezels hide the outermost pixels, so a border drawn flush to the
+/// edge loses its outer rows; the right edge is hidden a few pixels deeper
+/// than the left on the hardware this was tuned against.
+const KEY_FRAME_INSET_LEFT: u32 = 3;
+const KEY_FRAME_INSET_RIGHT: u32 = 7;
+const KEY_FRAME_INSET_TOP: u32 = 3;
+const KEY_FRAME_INSET_BOTTOM: u32 = 3;
+const KEY_FRAME_RADIUS: u32 = 16;
+const KEY_BORDER_THICKNESS: u32 = 6;
+
+/// Outline the key inside the frame insets and make everything outside
+/// that rounded rectangle transparent.
+fn draw_key_frame(img: &mut RgbaImage, color: Rgba<u8>, thickness: u32) {
+    let x = KEY_FRAME_INSET_LEFT;
+    let y = KEY_FRAME_INSET_TOP;
+    let w = img.width() - KEY_FRAME_INSET_LEFT - KEY_FRAME_INSET_RIGHT;
+    let h = img.height() - KEY_FRAME_INSET_TOP - KEY_FRAME_INSET_BOTTOM;
+    draw_volume_bar_outline(img, x, y, w, h, KEY_FRAME_RADIUS, color, thickness);
+    clip_rounded_rect(img, x, y, w, h, KEY_FRAME_RADIUS);
+}
+
+/// Draw a speaker glyph (body, cone, two sound arcs) centred on (`cx`, `cy`)
+/// and roughly `size` pixels wide, antialiased by 4x4 supersampling.
+fn draw_speaker_glyph(img: &mut RgbaImage, cx: f32, cy: f32, size: f32, color: Rgba<u8>) {
+    let u = size / 48.0; // design unit: the glyph is laid out on a 48-wide grid
+    // Body: rectangle left of centre. Cone: trapezoid flaring to the right.
+    let body = (cx - 22.0 * u, cy - 6.0 * u, cx - 12.0 * u, cy + 6.0 * u);
+    let cone_left = cx - 12.0 * u;
+    let cone_right = cx - 1.0 * u;
+    let cone_half_near = 6.0 * u;
+    let cone_half_far = 15.0 * u;
+    // Arcs: centred on the cone mouth, sweeping ±45°.
+    let arc_cx = cx - 2.0 * u;
+    let arcs = [(8.0 * u, 3.0 * u), (16.0 * u, 3.0 * u)];
+    let half_angle = std::f32::consts::FRAC_PI_4;
+
+    let inside = |x: f32, y: f32| -> bool {
+        if x >= body.0 && x <= body.2 && y >= body.1 && y <= body.3 {
+            return true;
+        }
+        if x >= cone_left && x <= cone_right {
+            let t = (x - cone_left) / (cone_right - cone_left);
+            let half = cone_half_near + (cone_half_far - cone_half_near) * t;
+            if (y - cy).abs() <= half {
+                return true;
+            }
+        }
+        let dx = x - arc_cx;
+        let dy = y - cy;
+        if dx > 0.0 {
+            let dist = (dx * dx + dy * dy).sqrt();
+            let angle = dy.atan2(dx).abs();
+            if angle <= half_angle {
+                for (r, t) in arcs {
+                    if (dist - r).abs() <= t / 2.0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    let x0 = (cx - size * 0.6).max(0.0) as u32;
+    let x1 = ((cx + size * 0.6) as u32).min(img.width());
+    let y0 = (cy - size * 0.5).max(0.0) as u32;
+    let y1 = ((cy + size * 0.5) as u32).min(img.height());
+    const SS: u32 = 4;
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let mut hits = 0u32;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = px as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let y = py as f32 + (sy as f32 + 0.5) / SS as f32;
+                    if inside(x, y) {
+                        hits += 1;
+                    }
+                }
+            }
+            if hits > 0 {
+                let a = hits as f32 / (SS * SS) as f32;
+                let bg = *img.get_pixel(px, py);
+                img.put_pixel(px, py, blend_colors(bg, color, a));
+            }
+        }
+    }
+}
+
+/// What the "clear preset" key is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClearFace {
+    /// Grey "CLEAR / preset"; nothing pending.
+    Idle,
+    /// Red "Tap the button to clear it"; the next memory key tap erases.
+    Armed,
+    /// Bright red flash after a hold wiped every preset.
+    AllCleared,
+}
+
+/// Render a 144x144 keypad image for the "clear preset" button.
+pub fn get_clear_button_data_uri(face: ClearFace) -> Result<String> {
     const SIZE: u32 = 144;
-    const BORDER_RADIUS: u32 = 18;
-    const BORDER_THICKNESS: u32 = 4;
-    const LABEL_Y: u32 = 34;
-    const LABEL_SIZE: f32 = 32.0;
-    const STATUS_Y: u32 = 84;
-    const STATUS_SIZE: f32 = 22.0;
-    const TEXT_PAD: u32 = 10;
+    const TEXT_PAD: u32 = 14;
 
-    let armed = Rgba([235, 95, 95, 255]);
+    let danger = Rgba([235, 95, 95, 255]);
     let idle = Rgba([120, 120, 120, 255]);
-    let accent = if target.is_some() { armed } else { idle };
+    let white = Rgba([235, 235, 235, 255]);
 
-    let mut img = RgbaImage::from_pixel(SIZE, SIZE, Rgba([18, 18, 18, 255]));
-    let label_color = Rgba([235, 235, 235, 255]);
-    draw_text_centered(&mut img, "CLEAR", TEXT_PAD, LABEL_Y, SIZE - TEXT_PAD * 2, LABEL_SIZE, label_color);
-    let status = target.unwrap_or("nothing");
-    draw_text_centered(&mut img, status, TEXT_PAD, STATUS_Y, SIZE - TEXT_PAD * 2, STATUS_SIZE, accent);
-    draw_volume_bar_outline(&mut img, 0, 0, SIZE, SIZE, BORDER_RADIUS, accent, BORDER_THICKNESS);
-    clip_rounded_corners(&mut img, BORDER_RADIUS);
+    let (background, accent, border_thickness) = match face {
+        ClearFace::Idle => (Rgba([18, 18, 18, 255]), idle, KEY_BORDER_THICKNESS),
+        ClearFace::Armed => (Rgba([70, 20, 20, 255]), danger, KEY_BORDER_THICKNESS + 2),
+        ClearFace::AllCleared => (Rgba([200, 45, 45, 255]), white, KEY_BORDER_THICKNESS + 2),
+    };
+    let mut img = RgbaImage::from_pixel(SIZE, SIZE, background);
+    let text_w = SIZE - TEXT_PAD * 2;
+
+    match face {
+        ClearFace::Idle => {
+            draw_text_centered(&mut img, "CLEAR", TEXT_PAD, 34, text_w, 32.0, white);
+            draw_text_centered(&mut img, "preset", TEXT_PAD, 84, text_w, 22.0, idle);
+        }
+        ClearFace::Armed => {
+            const LINE_SIZE: f32 = 26.0;
+            for (i, line) in ["Tap the", "button", "to clear it"].iter().enumerate() {
+                let y = 26 + i as u32 * 32;
+                draw_text_centered(&mut img, line, TEXT_PAD, y, text_w, LINE_SIZE, white);
+            }
+        }
+        ClearFace::AllCleared => {
+            draw_text_centered(&mut img, "ALL", TEXT_PAD, 34, text_w, 32.0, white);
+            draw_text_centered(&mut img, "cleared", TEXT_PAD, 84, text_w, 22.0, white);
+        }
+    }
+    draw_key_frame(&mut img, accent, border_thickness);
     png_data_uri(&img)
 }
 
-/// Make everything outside a full-canvas rounded rectangle transparent, with
-/// antialiased edges.
-fn clip_rounded_corners(img: &mut RgbaImage, radius: u32) {
+/// Make everything outside the rounded rectangle (`rx`, `ry`, `rw`, `rh`)
+/// transparent, with antialiased edges.
+fn clip_rounded_rect(img: &mut RgbaImage, rx: u32, ry: u32, rw: u32, rh: u32, radius: u32) {
     let (w, h) = (img.width(), img.height());
     for y in 0..h {
         for x in 0..w {
             let d = volume_bar_distance(
                 x as f32 + 0.5,
                 y as f32 + 0.5,
-                0.0,
-                0.0,
-                w as f32,
-                h as f32,
+                rx as f32,
+                ry as f32,
+                rw as f32,
+                rh as f32,
                 radius as f32,
             );
             if d >= 0.5 {
@@ -827,19 +977,25 @@ mod memory_button_tests {
     #[ignore = "writes preview PNGs for manual inspection"]
     fn dump_memory_button_previews() {
         let dir = std::env::var("MEMORY_PREVIEW_DIR").expect("MEMORY_PREVIEW_DIR");
-        for (name, label, stored, loaded) in [
-            ("empty", "MEM", None, false),
-            ("stored", "Gaming", Some(5usize), false),
-            ("one", "Stream night", Some(1), false),
-            ("loaded", "Gaming", Some(5), true),
+        for (name, label, stored, loaded, armed, flash) in [
+            ("empty", "Preset 1", None, false, false, false),
+            ("stored", "Preset 2", Some(5usize), false, false, false),
+            ("one", "Stream night", Some(1), false, false, false),
+            ("loaded", "Preset 3", Some(5), true, false, false),
+            ("armed", "Preset 3", Some(5), true, true, false),
+            ("flash", "Preset 3", Some(5), true, false, true),
         ] {
-            let uri = super::get_memory_button_data_uri(label, stored, loaded).unwrap();
+            let uri = super::get_memory_button_data_uri(label, stored, loaded, armed, flash).unwrap();
             let b64 = uri.split_once(',').unwrap().1;
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
             std::fs::write(format!("{dir}/memory-{name}.png"), bytes).unwrap();
         }
-        for (name, target) in [("clear-idle", None), ("clear-armed", Some("Gaming"))] {
-            let uri = super::get_clear_button_data_uri(target).unwrap();
+        for (name, face) in [
+            ("clear-idle", super::ClearFace::Idle),
+            ("clear-armed", super::ClearFace::Armed),
+            ("clear-all", super::ClearFace::AllCleared),
+        ] {
+            let uri = super::get_clear_button_data_uri(face).unwrap();
             let b64 = uri.split_once(',').unwrap().1;
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64).unwrap();
             std::fs::write(format!("{dir}/memory-{name}.png"), bytes).unwrap();

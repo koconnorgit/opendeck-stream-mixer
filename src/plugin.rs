@@ -633,7 +633,7 @@ pub async fn init() -> OpenActionResult<()> {
     set_global_event_handler(&GlobalHandler);
     register_action(VolumeControllerAction).await;
     register_action(crate::memory::VolumeMemoryAction).await;
-    register_action(crate::memory::ClearMemoryAction).await;
+    register_action(crate::memory::ClearPresetAction).await;
 
     run(std::env::args().collect()).await
 }
