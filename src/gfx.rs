@@ -710,8 +710,9 @@ pub fn get_encoder_lcd_data_uri(icon_data_uri: &str, title: &str, vol_percent: f
 /// Render a 144x144 keypad image for a volume-memory button: the button's
 /// label on top and its state ("empty" or how many sources it holds) below,
 /// inside a rounded border that turns green once a snapshot is stored. The
-/// `loaded` preset (last stored or recalled) gets a filled green background
-/// and a thicker border so it stands out from its siblings at a glance.
+/// `loaded` preset (last stored or recalled, and not changed since) gets a
+/// filled green background and a thicker border so it stands out from its
+/// siblings at a glance.
 /// While the clear key is `armed`, every stored button is washed in a red
 /// haze and reads "tap to clear" so the deck shows which keys a tap would
 /// erase. `flash` inverts the face (bright background, dark glyph and

@@ -19,6 +19,14 @@
 //! stored "Spotify at 40%" still applies after the track changed). Sources
 //! with no stored entry are left untouched; stored entries whose source is
 //! gone are ignored.
+//!
+//! The key last stored or recalled is highlighted "loaded". That highlight
+//! only means something while the mixer still matches the preset, so after
+//! every mixer refresh the loaded snapshot is re-planned against the live
+//! sources exactly as a recall would be, and if any covered source has moved
+//! away from its stored level or mute (a dial turn, a system change, an app
+//! adjusting itself) the highlight is dropped and the key goes back to
+//! reading "N sources".
 
 use openaction::*;
 use serde::{Deserialize, Serialize};
@@ -55,6 +63,18 @@ pub const ARM_TIMEOUT_SECS: u64 = 10;
 /// Default key text when no label is set: "Preset N", where N is the key's
 /// position among the visible memory keys in reading order.
 const DEFAULT_LABEL_PREFIX: &str = "Preset";
+
+/// A live level this far (in percent) from its stored level still counts
+/// as matching the loaded preset. PulseAudio volumes are integers on a
+/// 0..65536 scale, so a recalled level reads back within a hundredth of a
+/// percent; anything beyond this is a real change.
+pub const DRIFT_TOLERANCE_PERCENT: f32 = 0.5;
+
+/// After a store or recall, drift checks wait this long before they can
+/// drop the highlight. A refresh already in flight when the recall wrote
+/// its levels can report the old values, and the writes themselves land a
+/// few events later; neither is the user changing anything.
+const DRIFT_GRACE_MS: u64 = 1500;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
@@ -124,6 +144,59 @@ pub fn snapshot_channels<'a>(
 ///    single stored "Firefox" level applies to every open tab.
 pub fn plan_recall(snapshot: &MemorySnapshot, channels: &[MixerChannel]) -> Vec<RecallStep> {
     let entries = &snapshot.entries;
+    channels
+        .iter()
+        .zip(assign_entries(snapshot, channels))
+        .filter_map(|(ch, ei)| {
+            let e = &entries[ei?];
+            Some(RecallStep {
+                app_name: ch.app_name.clone(),
+                member_uids: ch.member_uids.clone(),
+                is_device: ch.is_device,
+                vol_percent: e.vol_percent,
+                mute: e.mute,
+            })
+        })
+        .collect()
+}
+
+/// One live source that no longer sits where the loaded preset put it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drift {
+    pub app_name: String,
+    pub stored_vol: f32,
+    pub live_vol: f32,
+    pub stored_mute: bool,
+    pub live_mute: bool,
+}
+
+/// The first live channel the snapshot covers whose volume (beyond
+/// [`DRIFT_TOLERANCE_PERCENT`]) or mute differs from its stored entry, or
+/// `None` when the mixer still matches the preset. Uses the same matching
+/// as [`plan_recall`], so "matches" means exactly "a recall would write
+/// nothing new". Sources the preset doesn't cover are ignored, as a recall
+/// would leave them alone too.
+pub fn find_drift(snapshot: &MemorySnapshot, channels: &[MixerChannel]) -> Option<Drift> {
+    channels
+        .iter()
+        .zip(assign_entries(snapshot, channels))
+        .find_map(|(ch, ei)| {
+            let e = &snapshot.entries[ei?];
+            let moved = (ch.vol_percent - e.vol_percent).abs() > DRIFT_TOLERANCE_PERCENT;
+            (moved || ch.mute != e.mute).then(|| Drift {
+                app_name: ch.app_name.clone(),
+                stored_vol: e.vol_percent,
+                live_vol: ch.vol_percent,
+                stored_mute: e.mute,
+                live_mute: ch.mute,
+            })
+        })
+}
+
+/// The matching behind [`plan_recall`] and [`find_drift`]: for each channel
+/// (by position), the index of the stored entry it pairs with, if any.
+fn assign_entries(snapshot: &MemorySnapshot, channels: &[MixerChannel]) -> Vec<Option<usize>> {
+    let entries = &snapshot.entries;
     let mut used = vec![false; entries.len()];
     let mut assigned: Vec<Option<usize>> = vec![None; channels.len()];
 
@@ -174,20 +247,7 @@ pub fn plan_recall(snapshot: &MemorySnapshot, channels: &[MixerChannel]) -> Vec<
         }
     }
 
-    channels
-        .iter()
-        .zip(assigned)
-        .filter_map(|(ch, ei)| {
-            let e = &entries[ei?];
-            Some(RecallStep {
-                app_name: ch.app_name.clone(),
-                member_uids: ch.member_uids.clone(),
-                is_device: ch.is_device,
-                vol_percent: e.vol_percent,
-                mute: e.mute,
-            })
-        })
-        .collect()
+    assigned
 }
 
 /// A memory key currently held down.
@@ -230,11 +290,38 @@ async fn consume_hold(instance_id: &str, started: Instant) -> bool {
 }
 
 /// The memory button whose preset is currently "loaded": the last one that
-/// stored or successfully recalled. Rendered highlighted so the deck shows
-/// which preset the mixer was last set to. Instance id; `None` until a
-/// button is used after startup.
-static LOADED_PRESET: LazyLock<Mutex<Option<String>>> =
+/// stored or successfully recalled, for as long as the mixer still matches
+/// it (see [`drop_loaded_if_drifted`]). Rendered highlighted so the deck
+/// shows which preset the mixer is set to. `None` until a button is used
+/// after startup, and again once the levels have moved away.
+static LOADED_PRESET: LazyLock<Mutex<Option<LoadedPreset>>> =
     LazyLock::new(|| Mutex::const_new(None));
+
+#[derive(Clone, Debug)]
+struct LoadedPreset {
+    instance_id: String,
+    /// When the store/recall happened; drift checks hold off for
+    /// [`DRIFT_GRACE_MS`] after it.
+    at: Instant,
+}
+
+/// Set while a drift check inside the grace window has queued a re-check
+/// for when the window closes, so one window spawns at most one timer.
+static DRIFT_RECHECK_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// True when `instance_id` is the loaded preset.
+fn is_loaded(loaded: &Option<LoadedPreset>, instance_id: &str) -> bool {
+    loaded.as_ref().is_some_and(|l| l.instance_id == instance_id)
+}
+
+/// Forget the loaded preset if it is `instance_id`. Returns whether it was.
+fn unload(loaded: &mut Option<LoadedPreset>, instance_id: &str) -> bool {
+    let was = is_loaded(loaded, instance_id);
+    if was {
+        *loaded = None;
+    }
+    was
+}
 
 /// Last-known settings per visible instance. The SDK keeps settings private
 /// on `Instance`, and the previously loaded button must be re-rendered (to
@@ -255,12 +342,16 @@ static CLEAR_ARMED: AtomicBool = AtomicBool::new(false);
 /// arming can't cancel a later one.
 static ARM_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Re-evaluate the blank/drawn state against the mixer. Called after every
-/// refresh; only a transition touches the deck, so steady state costs one
-/// lock and no image writes.
+/// Re-evaluate the keys against the mixer. Called after every refresh. A
+/// blank/drawn transition redraws every key; otherwise only the loaded
+/// preset is checked for drift, so steady state costs a couple of locks and
+/// no image writes.
 pub async fn sync_with_mixer() {
     let empty = mixer::MIXER_CHANNELS.lock().await.is_empty();
     if DARK.swap(empty, Ordering::AcqRel) == empty {
+        if !empty {
+            drop_loaded_if_drifted().await;
+        }
         return;
     }
     if empty && CLEAR_ARMED.swap(false, Ordering::AcqRel) {
@@ -268,8 +359,87 @@ pub async fn sync_with_mixer() {
         ARM_GENERATION.fetch_add(1, Ordering::AcqRel);
         println!("Clear preset: disarmed (mixer went empty)");
     }
+    if !empty {
+        drop_loaded_if_drifted().await;
+    }
     refresh_memory_buttons().await;
     refresh_clear_buttons().await;
+}
+
+/// If a preset is loaded and some source it covers has moved away from the
+/// stored level or mute, forget it and redraw its key without the highlight.
+///
+/// Inside the grace window after a store/recall a mismatch is not trusted
+/// (the recall's own writes may not have been read back yet); instead one
+/// full refresh is queued for when the window closes, which lands back
+/// here with settled levels. That also covers a manual change made during
+/// the window, which would otherwise wait for the next audio event.
+async fn drop_loaded_if_drifted() {
+    let (instance_id, at) = {
+        let loaded = LOADED_PRESET.lock().await;
+        let Some(l) = loaded.as_ref() else { return };
+        (l.instance_id.clone(), l.at)
+    };
+    let Some(settings) = SETTINGS_CACHE.lock().await.get(&instance_id).cloned() else { return };
+    let Some(snapshot) = settings.snapshot.as_ref() else { return };
+
+    let channels = ordered_channels().await;
+    let Some(drift) = find_drift(snapshot, &channels) else { return };
+
+    let grace = Duration::from_millis(DRIFT_GRACE_MS);
+    let since = at.elapsed();
+    if since < grace {
+        if !DRIFT_RECHECK_PENDING.swap(true, Ordering::AcqRel) {
+            tokio::spawn(async move {
+                tokio::time::sleep(grace - since).await;
+                DRIFT_RECHECK_PENDING.store(false, Ordering::Release);
+                crate::audio::pulse::pulse_monitor::request_refresh();
+            });
+        }
+        return;
+    }
+
+    {
+        let mut loaded = LOADED_PRESET.lock().await;
+        // A newer store/recall may have replaced it while we were planning.
+        if !loaded.as_ref().is_some_and(|l| l.instance_id == instance_id && l.at == at) {
+            return;
+        }
+        *loaded = None;
+    }
+    let inst = get_instance(instance_id.clone()).await;
+    let label = match &inst {
+        Some(inst) => display_label(inst, &settings).await,
+        None => settings.label.trim().to_string(),
+    };
+    println!(
+        "Volume memory {instance_id}: '{label}' no longer loaded: {} is {}%{} (stored {}%{})",
+        drift.app_name,
+        drift.live_vol.round(),
+        if drift.live_mute { " muted" } else { "" },
+        drift.stored_vol.round(),
+        if drift.stored_mute { " muted" } else { "" },
+    );
+    if let Some(inst) = inst {
+        render(&inst, &settings).await;
+    }
+}
+
+/// Mark `instance` as the loaded preset and un-highlight whichever button
+/// held that status before.
+async fn mark_loaded(instance: &Instance, settings: &VolumeMemorySettings) {
+    let previous = LOADED_PRESET.lock().await.replace(LoadedPreset {
+        instance_id: instance.instance_id.clone(),
+        at: Instant::now(),
+    });
+    render(instance, settings).await;
+
+    if let Some(prev_id) = previous.map(|l| l.instance_id).filter(|id| id != &instance.instance_id) {
+        let prev_settings = SETTINGS_CACHE.lock().await.get(&prev_id).cloned();
+        if let (Some(prev), Some(prev_settings)) = (get_instance(prev_id).await, prev_settings) {
+            render(&prev, &prev_settings).await;
+        }
+    }
 }
 
 /// Redraw every memory button from its cached settings.
@@ -325,23 +495,6 @@ async fn remember_settings(instance: &Instance, settings: &VolumeMemorySettings)
         .lock()
         .await
         .insert(instance.instance_id.clone(), settings.clone());
-}
-
-/// Mark `instance` as the loaded preset and un-highlight whichever button
-/// held that status before.
-async fn mark_loaded(instance: &Instance, settings: &VolumeMemorySettings) {
-    let previous = LOADED_PRESET
-        .lock()
-        .await
-        .replace(instance.instance_id.clone());
-    render(instance, settings).await;
-
-    if let Some(prev_id) = previous.filter(|id| id != &instance.instance_id) {
-        let prev_settings = SETTINGS_CACHE.lock().await.get(&prev_id).cloned();
-        if let (Some(prev), Some(prev_settings)) = (get_instance(prev_id).await, prev_settings) {
-            render(&prev, &prev_settings).await;
-        }
-    }
 }
 
 /// The key's text: its custom label, or "Preset N" by position.
@@ -499,12 +652,7 @@ async fn clear_preset(instance: &Instance, settings: &VolumeMemorySettings) -> O
     };
     instance.set_settings(&updated).await?;
     remember_settings(instance, &updated).await;
-    {
-        let mut loaded = LOADED_PRESET.lock().await;
-        if loaded.as_deref() == Some(instance.instance_id.as_str()) {
-            *loaded = None;
-        }
-    }
+    unload(&mut *LOADED_PRESET.lock().await, &instance.instance_id);
     println!(
         "Clear preset: erased preset '{}' ({})",
         display_label(instance, &updated).await,
@@ -539,7 +687,7 @@ async fn render(instance: &Instance, settings: &VolumeMemorySettings) {
     }
     let label = display_label(instance, settings).await;
     let stored = settings.snapshot.as_ref().map(|s| s.entries.len());
-    let loaded = LOADED_PRESET.lock().await.as_deref() == Some(instance.instance_id.as_str());
+    let loaded = is_loaded(&*LOADED_PRESET.lock().await, &instance.instance_id);
     let armed = CLEAR_ARMED.load(Ordering::Acquire);
     match gfx::get_memory_button_data_uri(&label, stored, loaded, armed, false) {
         Ok(uri) => {
@@ -708,10 +856,7 @@ impl Action for VolumeMemoryAction {
         remember_settings(instance, settings).await;
         if settings.snapshot.is_none() {
             // A cleared preset can't be the loaded one.
-            let mut loaded = LOADED_PRESET.lock().await;
-            if loaded.as_deref() == Some(instance.instance_id.as_str()) {
-                *loaded = None;
-            }
+            unload(&mut *LOADED_PRESET.lock().await, &instance.instance_id);
         }
         render(instance, settings).await;
         Ok(())
@@ -920,6 +1065,91 @@ mod tests {
         game.member_uids = vec![1, 2, 3];
         let steps = plan_recall(&s, &[game]);
         assert_eq!(steps[0].member_uids, vec![1, 2, 3]);
+    }
+
+    fn ch_at(app_id: &str, app_name: &str, identity: Option<&str>, uid: u32, vol: f32, mute: bool) -> MixerChannel {
+        let mut c = ch(app_id, app_name, identity, uid);
+        c.vol_percent = vol;
+        c.mute = mute;
+        c
+    }
+
+    #[test]
+    fn no_drift_right_after_a_store() {
+        let live = vec![
+            ch_at("Spotify", "Song A", None, 1, 40.0, false),
+            ch_at("Firefox", "Nmplol - Twitch", Some("ttv:nmplol"), 2, 75.0, true),
+        ];
+        let s = snapshot_channels(&live, 0);
+        assert_eq!(find_drift(&s, &live), None);
+    }
+
+    #[test]
+    fn pulse_readback_rounding_is_not_drift() {
+        // 40% written to PulseAudio reads back as 39.9994% (65536 steps).
+        let s = snap(vec![entry("Spotify", "Song A", None, 40.0, false)]);
+        let live = vec![ch_at("Spotify", "Song A", None, 1, 39.9994, false)];
+        assert_eq!(find_drift(&s, &live), None);
+    }
+
+    #[test]
+    fn a_turned_dial_is_drift() {
+        let s = snap(vec![
+            entry("Spotify", "Song A", None, 40.0, false),
+            entry("Discord", "Discord", None, 80.0, false),
+        ]);
+        let live = vec![
+            ch_at("Spotify", "Song A", None, 1, 40.0, false),
+            ch_at("Discord", "Discord", None, 2, 65.0, false),
+        ];
+        let d = find_drift(&s, &live).expect("Discord moved");
+        assert_eq!(d.app_name, "Discord");
+        assert_eq!((d.stored_vol, d.live_vol), (80.0, 65.0));
+    }
+
+    #[test]
+    fn a_mute_toggle_is_drift_even_at_the_same_level() {
+        let s = snap(vec![entry("Spotify", "Song A", None, 40.0, false)]);
+        let live = vec![ch_at("Spotify", "Song A", None, 1, 40.0, true)];
+        let d = find_drift(&s, &live).expect("mute changed");
+        assert!(d.live_mute && !d.stored_mute);
+    }
+
+    #[test]
+    fn sources_outside_the_preset_never_drift_it() {
+        // A recall would leave Discord alone, so Discord can't un-load it.
+        let s = snap(vec![entry("Spotify", "Song A", None, 40.0, false)]);
+        let live = vec![
+            ch_at("Spotify", "Song B", None, 1, 40.0, false),
+            ch_at("Discord", "Discord", None, 2, 10.0, true),
+        ];
+        assert_eq!(find_drift(&s, &live), None);
+    }
+
+    #[test]
+    fn drift_uses_recall_matching_for_browser_tabs() {
+        // Same swapped-name scenario as recall: identity decides which stored
+        // level each tab is held to, so neither tab reads as drifted.
+        let s = snap(vec![
+            entry("Firefox", "Nmplol - Twitch", Some("ttv:nmplol"), 20.0, false),
+            entry("Firefox", "Xqc - Twitch", Some("ttv:xqc"), 80.0, false),
+        ]);
+        let live = vec![
+            ch_at("Firefox", "Xqc - Twitch", Some("ttv:nmplol"), 10, 20.0, false),
+            ch_at("Firefox", "Nmplol - Twitch", Some("ttv:xqc"), 11, 80.0, false),
+        ];
+        assert_eq!(find_drift(&s, &live), None);
+    }
+
+    #[test]
+    fn missing_sources_are_not_drift() {
+        let s = snap(vec![
+            entry("Spotify", "Song A", None, 40.0, false),
+            entry("Discord", "Discord", None, 80.0, false),
+        ]);
+        let live = vec![ch_at("Spotify", "Song A", None, 1, 40.0, false)];
+        assert_eq!(find_drift(&s, &live), None);
+        assert_eq!(find_drift(&s, &[]), None);
     }
 
     #[test]
