@@ -130,7 +130,7 @@ pub struct VolumeControllerAction;
 
 #[async_trait]
 impl Action for VolumeControllerAction {
-    const UUID: ActionUuid = "com.victormarin.volume-controller.volctrl";
+    const UUID: ActionUuid = "io.github.koconnorgit.stream-mixer.volctrl";
     type Settings = VolumeControllerSettings;
 
     async fn will_disappear(

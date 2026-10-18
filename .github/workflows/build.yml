@@ -85,22 +85,22 @@ jobs:
       - name: Get plugin directory name
         id: plugin_name
         run: |
-          PLUGIN_NAME="com.victormarin.volume-controller.sdPlugin"
+          PLUGIN_NAME="io.github.koconnorgit.stream-mixer.sdPlugin"
           echo "name=$PLUGIN_NAME" >> $GITHUB_OUTPUT
 
       - name: Create plugin package
         run: |
           # Plugin directory should have .sdPlugin extension
           PLUGIN_DIR="${{ steps.plugin_name.outputs.name }}"
-          # Zip name is com.victormarin.volume-controller.zip
-          ZIP_NAME="com.victormarin.volume-controller.zip"
+          # Zip name is io.github.koconnorgit.stream-mixer.zip
+          ZIP_NAME="io.github.koconnorgit.stream-mixer.zip"
 
           mkdir -p "$PLUGIN_DIR"
 
           # Copy binaries from artifacts
-          cp binaries/oa-volume-controller-x86_64-unknown-linux-gnu/oa-volume-controller-x86_64-unknown-linux-gnu "$PLUGIN_DIR/"
-          cp binaries/oa-volume-controller-aarch64-unknown-linux-gnu/oa-volume-controller-aarch64-unknown-linux-gnu "$PLUGIN_DIR/"
-          chmod +x "$PLUGIN_DIR"/oa-volume-controller-*
+          cp binaries/stream-mixer-x86_64-unknown-linux-gnu/stream-mixer-x86_64-unknown-linux-gnu "$PLUGIN_DIR/"
+          cp binaries/stream-mixer-aarch64-unknown-linux-gnu/stream-mixer-aarch64-unknown-linux-gnu "$PLUGIN_DIR/"
+          chmod +x "$PLUGIN_DIR"/stream-mixer-*
 
           # Copy required files
           cp manifest.json "$PLUGIN_DIR/"
@@ -156,8 +156,8 @@ jobs:
       - name: Get plugin directory name and zip name
         id: plugin_name
         run: |
-          PLUGIN_NAME="com.victormarin.volume-controller.sdPlugin"
-          ZIP_NAME="com.victormarin.volume-controller.zip"
+          PLUGIN_NAME="io.github.koconnorgit.stream-mixer.sdPlugin"
+          ZIP_NAME="io.github.koconnorgit.stream-mixer.zip"
           echo "name=$PLUGIN_NAME" >> $GITHUB_OUTPUT
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
 
@@ -181,7 +181,7 @@ jobs:
         id: release_notes
         run: |
           cat > release_notes.md << 'EOF'
-          ## Volume Controller Plugin
+          ## Stream Mixer
 
           Per-application volume control for Stream Deck on Linux (OpenDeck + PulseAudio/PipeWire).
 
@@ -201,6 +201,14 @@ jobs:
           > **Note:** LCD touch-to-mute requires an OpenDeck build that emits `touchTap`
           > (e.g. one with Stream Deck + touchscreen support). On stock OpenDeck, touch is
           > inert and the dial press still mutes.
+
+          ### Upgrading from the 1.x "Volume Controller" builds
+          Stream Mixer 2.x has its own plugin and action UUIDs. Install it alongside, remove the
+          old `com.victormarin.volume-controller.sdPlugin` directory, and re-add your keys and
+          dials with the Stream Mixer actions. Presets and the ignored-apps list do not carry over.
+
+          Stream Mixer began as a fork of Victor Marin's `opendeck-volume-controller` (MIT); see the
+          README's "Origins and credits".
           EOF
 
       - name: Create or update release

@@ -833,7 +833,7 @@ pub struct VolumeMemoryAction;
 
 #[async_trait]
 impl Action for VolumeMemoryAction {
-    const UUID: ActionUuid = "com.victormarin.volume-controller.memory";
+    const UUID: ActionUuid = "io.github.koconnorgit.stream-mixer.memory";
     type Settings = VolumeMemorySettings;
 
     async fn will_appear(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
@@ -898,7 +898,7 @@ pub struct ClearPresetAction;
 
 #[async_trait]
 impl Action for ClearPresetAction {
-    const UUID: ActionUuid = "com.victormarin.volume-controller.memory-clear";
+    const UUID: ActionUuid = "io.github.koconnorgit.stream-mixer.memory-clear";
     type Settings = ClearPresetSettings;
 
     async fn will_appear(&self, instance: &Instance, _: &Self::Settings) -> OpenActionResult<()> {

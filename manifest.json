@@ -1,27 +1,27 @@
 {
-  "Name": "Volume Controller",
-  "Author": "Victor Marin",
-  "Version": "1.10.0",
+  "Name": "Stream Mixer",
+  "Author": "koconnorgit",
+  "Version": "2.0.0",
   "CodePaths": {
-    "x86_64-unknown-linux-gnu": "oa-volume-controller-x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu": "oa-volume-controller-aarch64-unknown-linux-gnu"
+    "x86_64-unknown-linux-gnu": "stream-mixer-x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu": "stream-mixer-aarch64-unknown-linux-gnu"
   },
-  "CodePathLin": "oa-volume-controller-x86_64-unknown-linux-gnu",
+  "CodePathLin": "stream-mixer-x86_64-unknown-linux-gnu",
   "OS": [
     {
       "Platform": "linux"
     }
   ],
-  "Category": "Volume Controller",
-  "Description": "Take full control of your sound experience with fine-tuned per-app volume management!",
+  "Category": "Stream Mixer",
+  "Description": "Per-app volume mixer for Stream Deck on Linux: keypad grids, Stream Deck + dials with live LCD art, touch-to-mute, and volume memory presets.",
   "Icon": "img/icon",
   "PropertyInspectorPath": "pi.html",
   "Actions": [
     {
       "Icon": "img/grid-slider",
-      "Name": "Volume Control Auto Grid",
-      "UUID": "com.victormarin.volume-controller.volctrl",
-      "Tooltip": "Volume controller grid part, fill your SD with this",
+      "Name": "Mixer Channel",
+      "UUID": "io.github.koconnorgit.stream-mixer.volctrl",
+      "Tooltip": "One mixer channel per column (keypad) or per dial (encoder); fill the deck with these",
       "Controllers": ["Keypad", "Encoder"],
       "Encoder": {
         "layout": "$B1",
@@ -39,7 +39,7 @@
     {
       "Icon": "img/memory",
       "Name": "Volume Memory",
-      "UUID": "com.victormarin.volume-controller.memory",
+      "UUID": "io.github.koconnorgit.stream-mixer.memory",
       "Tooltip": "Hold to store every source's volume and mute; tap to recall them",
       "PropertyInspectorPath": "pi-memory.html",
       "Controllers": ["Keypad"],
@@ -50,7 +50,7 @@
     {
       "Icon": "img/memory-clear",
       "Name": "Clear Preset",
-      "UUID": "com.victormarin.volume-controller.memory-clear",
+      "UUID": "io.github.koconnorgit.stream-mixer.memory-clear",
       "Tooltip": "Erase the stored volumes of the currently loaded memory preset",
       "PropertyInspectorPath": "pi-memory-clear.html",
       "Controllers": ["Keypad"],

@@ -63,7 +63,7 @@ pub fn start_pulse_monitoring() {
         // Create context
         let mut proplist = Proplist::new().unwrap();
         proplist
-            .set_str("application.name", "Volume Controller")
+            .set_str("application.name", "Stream Mixer")
             .unwrap();
 
         let mut context =

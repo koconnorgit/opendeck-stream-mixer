@@ -24,7 +24,7 @@ async fn main() -> OpenActionResult<()> {
     )
     .unwrap();
 
-    println!("Starting Volume Controller plugin...");
+    println!("Starting Stream Mixer plugin...");
 
     plugin::init().await
 }
