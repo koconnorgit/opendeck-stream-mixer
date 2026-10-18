@@ -22,7 +22,7 @@ Stream Mixer talks to PulseAudio (or PipeWire's PulseAudio layer) and turns your
 - **Real-time Updates**: Monitors PulseAudio events and updates the interface dynamically
 - **Ignore apps**: Exclude specific apps from showing in the volume controller
 - **Encoder/Dial Support**: Assign the action to an encoder dial on Stream Deck + / Stream Deck + XL. Rotate to adjust volume, press to mute, and see the app name, icon, and a live volume bar on the encoder's LCD zone.
-- **Touch-to-Mute**: Tap the encoder LCD to toggle mute, or long-press to dismiss the stream — requires a touch-enabled OpenDeck build and a [patched `openaction` fork](#patched-openaction-dependency).
+- **Touch-to-Mute**: Tap the encoder LCD to toggle mute, or long-press to dismiss the stream (OpenDeck 2.14 or later; see [Touch-to-mute requirements](#touch-to-mute-requirements)).
 - **Volume Memory**: Map any number of keys as volume presets. Hold one to store every source's current volume and mute, tap it to set them all back. See [Volume memory buttons](#volume-memory-buttons).
 
 ## Installation
@@ -36,20 +36,10 @@ Prerequisites:
 - OpenDeck installed and running
 - `curl` on `PATH` — used to fetch Kick.com streamer avatars (Kick sits behind Cloudflare, which rejects pure-Rust TLS clients; everything else still works without it)
 - A sans-serif Bold font on the system for the encoder LCD title rendering — the plugin looks for Noto Sans Bold or DejaVu Sans Bold at the usual Linux font paths and silently skips the title if neither is present
-- Network access to GitHub on the first build — it pulls a patched `openaction` fork (see below)
 
-### Patched `openaction` dependency
+### Touch-to-mute requirements
 
-This plugin depends on a **patched fork of the [`openaction`](https://crates.io/crates/openaction) crate**, not the version published on crates.io. `Cargo.toml` pins it via:
-
-```toml
-[patch.crates-io]
-openaction = { git = "https://github.com/koconnorgit/rust", branch = "main" }
-```
-
-The fork ([**koconnorgit/rust**](https://github.com/koconnorgit/rust)) adds a `touchTap` inbound event so the plugin can react to taps on the encoder LCD touchscreen; the upstream crate has no such event and silently drops it. `cargo build` fetches the fork automatically — no manual step — but the fork's `main` branch must remain available on GitHub for builds to resolve. See that repo's README for the full rationale.
-
-> The LCD **touch-to-mute** behaviour additionally needs an OpenDeck build that emits `touchTap` (e.g. one with Stream Deck + touchscreen support). On stock OpenDeck the touch event is never sent, so touch is simply inert — pressing the dial still mutes.
+The LCD **touch-to-mute** and long-touch dismiss gestures need an OpenDeck build that emits the `touchTap` event (OpenDeck 2.14 and later do). On older builds the touch event is never sent, so touch is simply inert and pressing the dial still mutes.
 
 Build and install:
 
@@ -107,7 +97,7 @@ Assign the action directly to an encoder dial on a Stream Deck + or Stream Deck 
 
 - **Rotate** the dial to adjust volume up or down
 - **Press** the dial to toggle mute
-- **Tap** the LCD to toggle mute, or **long-press** it to dismiss the stream — same as a long press on the keypad icon (requires a touch-enabled OpenDeck build; see [Patched `openaction` dependency](#patched-openaction-dependency))
+- **Tap** the LCD to toggle mute, or **long-press** it to dismiss the stream — same as a long press on the keypad icon (OpenDeck 2.14 or later; see [Touch-to-mute requirements](#touch-to-mute-requirements))
 - The LCD zone shows the 96×96 app icon on the left, and on the right: the app name on top (scrolls horizontally if long), a horizontal volume bar, and a percent readout below; muting dims the whole zone
 
 ### Volume memory buttons

@@ -509,8 +509,8 @@ impl Action for VolumeControllerAction {
         &self,
         instance: &Instance,
         _: &Self::Settings,
+        _tap_pos: (u16, u16),
         hold: bool,
-        _tap_pos: [u16; 2],
     ) -> OpenActionResult<()> {
         let dial_pos = instance.coordinates.as_ref().map(|c| c.column).unwrap_or(0);
         let encoder_map = ENCODER_TO_CHANNEL_MAP.lock().await;

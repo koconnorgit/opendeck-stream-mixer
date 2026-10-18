@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 pulsectl-rs = "0.3"
-openaction = "2.5.0"
+openaction = "2.8.0"
 tokio = { version = "1.45", features = ["full"] }
 log = "0.4"
 simplelog = "0.12"
@@ -22,8 +22,3 @@ ab_glyph = "0.2"
 zbus = { version = "5", features = ["tokio"] }
 futures-lite = "2.6.1"
 x11rb = "0.13"
-
-# Patched openaction SDK: adds the `touchTap` encoder event the published crate lacks.
-# Fork: https://github.com/koconnorgit/rust (changes live on the default `main` branch)
-[patch.crates-io]
-openaction = { git = "https://github.com/koconnorgit/rust", branch = "main" }

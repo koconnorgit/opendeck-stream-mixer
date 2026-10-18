@@ -1110,8 +1110,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openaction"
-version = "2.6.0"
-source = "git+https://github.com/koconnorgit/rust?branch=main#c1baa944433d66d5b5e5b2f952be312b82049b06"
+version = "2.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "336948ccb035d932ca20347c83c549e8dc6ef64a66e6329b2707b9cb010cc133"
 dependencies = [
  "async-trait",
  "dashmap",
