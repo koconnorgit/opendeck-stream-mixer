@@ -1,7 +1,7 @@
 {
   "Name": "Stream Mixer",
   "Author": "koconnorgit",
-  "Version": "2.1.0",
+  "Version": "2.2.0",
   "CodePaths": {
     "x86_64-unknown-linux-gnu": "stream-mixer-x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu": "stream-mixer-aarch64-unknown-linux-gnu"
