@@ -4,7 +4,15 @@
 //! mixer — the store fires, and the key flashes, the moment the hold reaches
 //! [`LONG_PRESS_MS`], while the key is still down. A tap recalls. Each button instance keeps its own
 //! snapshot in its action settings, so any number of memory buttons can
-//! coexist and the snapshots survive plugin and OpenDeck restarts.
+//! coexist and a key that leaves the screen (page or profile switch) keeps
+//! its preset.
+//!
+//! Presets never outlive the audio session they were taken in. Every
+//! snapshot is stamped with the current [`EPOCH`], which changes when the
+//! plugin starts (so a reboot or an OpenDeck restart forgets everything)
+//! and again whenever the mixer runs out of sources. Keys on screen are
+//! wiped the moment the mixer empties; a key that comes back later with a
+//! snapshot from an older epoch is wiped as it appears.
 //!
 //! A companion "Clear Preset" action works in two steps: press it to arm
 //! (it reads "Tap the button to clear it" and every stored memory button
@@ -89,6 +97,10 @@ pub struct VolumeMemorySettings {
 pub struct MemorySnapshot {
     /// Unix seconds when the snapshot was taken.
     pub saved_at: u64,
+    /// The [`EPOCH`] the snapshot was taken in. Anything else is stale and
+    /// gets dropped (see [`is_stale`]). Snapshots from before this field
+    /// existed read as 0 and are stale too.
+    pub epoch: u64,
     pub entries: Vec<MemoryEntry>,
 }
 
@@ -118,9 +130,11 @@ pub struct RecallStep {
 pub fn snapshot_channels<'a>(
     channels: impl IntoIterator<Item = &'a MixerChannel>,
     saved_at: u64,
+    epoch: u64,
 ) -> MemorySnapshot {
     MemorySnapshot {
         saved_at,
+        epoch,
         entries: channels
             .into_iter()
             .map(|ch| MemoryEntry {
@@ -289,6 +303,30 @@ async fn consume_hold(instance_id: &str, started: Instant) -> bool {
     }
 }
 
+/// The current audio session: a fresh value when the plugin starts and
+/// again every time the mixer empties (see [`advance_epoch`]). Unix
+/// milliseconds, so no two runs of the plugin ever share one and a snapshot
+/// persisted by an earlier process can never match.
+static EPOCH: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(now_unix_millis()));
+
+fn current_epoch() -> u64 {
+    EPOCH.load(Ordering::Acquire)
+}
+
+/// Start a new epoch so every snapshot taken so far reads as stale. Always
+/// strictly greater than the old value, even within the same millisecond.
+fn advance_epoch() -> u64 {
+    let next = now_unix_millis().max(current_epoch() + 1);
+    EPOCH.store(next, Ordering::Release);
+    next
+}
+
+/// True when `snapshot` was taken in a different epoch than `epoch`: before
+/// the plugin last started, or before the mixer last ran out of sources.
+pub fn is_stale(snapshot: &MemorySnapshot, epoch: u64) -> bool {
+    snapshot.epoch != epoch
+}
+
 /// The memory button whose preset is currently "loaded": the last one that
 /// stored or successfully recalled, for as long as the mixer still matches
 /// it (see [`drop_loaded_if_drifted`]). Rendered highlighted so the deck
@@ -354,10 +392,18 @@ pub async fn sync_with_mixer() {
         }
         return;
     }
-    if empty && CLEAR_ARMED.swap(false, Ordering::AcqRel) {
-        // Nothing left to clear; the blanked keys can't show the armed state.
-        ARM_GENERATION.fetch_add(1, Ordering::AcqRel);
-        println!("Clear preset: disarmed (mixer went empty)");
+    if empty {
+        // No sources left: the session is over, so every preset goes with
+        // it. Keys not on screen right now carry the old epoch and are
+        // wiped when they next appear.
+        let epoch = advance_epoch();
+        let cleared = erase_all_presets().await;
+        println!("Volume memory: mixer went empty, cleared {cleared} stored preset(s) (epoch {epoch})");
+        if CLEAR_ARMED.swap(false, Ordering::AcqRel) {
+            // Nothing left to clear; the blanked keys can't show the armed state.
+            ARM_GENERATION.fetch_add(1, Ordering::AcqRel);
+            println!("Clear preset: disarmed (mixer went empty)");
+        }
     }
     if !empty {
         drop_loaded_if_drifted().await;
@@ -497,6 +543,43 @@ async fn remember_settings(instance: &Instance, settings: &VolumeMemorySettings)
         .insert(instance.instance_id.clone(), settings.clone());
 }
 
+/// Take `settings` into the cache as the key's current state, first
+/// dropping a snapshot from an earlier epoch (a previous run of the plugin,
+/// or before the mixer last emptied): the key's settings are rewritten
+/// without it so the stale preset can't be recalled or shown. Returns what
+/// the key should now render.
+async fn adopt_settings(instance: &Instance, settings: &VolumeMemorySettings) -> VolumeMemorySettings {
+    let stale = settings
+        .snapshot
+        .as_ref()
+        .filter(|snapshot| is_stale(snapshot, current_epoch()));
+    let Some(snapshot) = stale else {
+        remember_settings(instance, settings).await;
+        return settings.clone();
+    };
+    let updated = VolumeMemorySettings {
+        label: settings.label.clone(),
+        snapshot: None,
+    };
+    match instance.set_settings(&updated).await {
+        Ok(()) => println!(
+            "Volume memory {}: dropped stale preset '{}' ({} sources from epoch {}, now {})",
+            instance.instance_id,
+            display_label(instance, &updated).await,
+            snapshot.entries.len(),
+            snapshot.epoch,
+            current_epoch(),
+        ),
+        Err(e) => eprintln!(
+            "Volume memory {}: failed to drop stale preset: {e}",
+            instance.instance_id
+        ),
+    }
+    remember_settings(instance, &updated).await;
+    unload(&mut *LOADED_PRESET.lock().await, &instance.instance_id);
+    updated
+}
+
 /// The key's text: its custom label, or "Preset N" by position.
 async fn display_label(instance: &Instance, settings: &VolumeMemorySettings) -> String {
     let label = settings.label.trim();
@@ -576,9 +659,10 @@ async fn toggle_armed(button: &Instance) -> OpenActionResult<()> {
     Ok(())
 }
 
-/// Erase every visible memory key's stored volumes (labels kept), drop the
-/// loaded highlight, disarm, and show "all cleared" on `button` briefly.
-async fn clear_all_presets(button: &Instance) {
+/// Erase every visible memory key's stored volumes (labels kept) and drop
+/// the loaded highlight. Returns how many keys held a preset. Draws nothing;
+/// callers redraw.
+async fn erase_all_presets() -> usize {
     let cache = SETTINGS_CACHE.lock().await.clone();
     let mut cleared = 0usize;
     for inst in visible_instances(VolumeMemoryAction::UUID).await {
@@ -599,6 +683,13 @@ async fn clear_all_presets(button: &Instance) {
         }
     }
     *LOADED_PRESET.lock().await = None;
+    cleared
+}
+
+/// Clear-key hold: erase every preset, disarm, and show "all cleared" on
+/// `button` briefly.
+async fn clear_all_presets(button: &Instance) {
+    let cleared = erase_all_presets().await;
     println!("Clear preset: hold cleared all {cleared} stored preset(s)");
 
     if let Ok(uri) = gfx::get_clear_button_data_uri(gfx::ClearFace::AllCleared) {
@@ -664,6 +755,13 @@ async fn clear_preset(instance: &Instance, settings: &VolumeMemorySettings) -> O
     Ok(())
 }
 
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -710,7 +808,7 @@ async fn flash_saved(instance: &Instance, settings: &VolumeMemorySettings) {
 
 async fn store(instance: &Instance, settings: &VolumeMemorySettings) -> OpenActionResult<()> {
     let channels = ordered_channels().await;
-    let snapshot = snapshot_channels(&channels, now_unix_secs());
+    let snapshot = snapshot_channels(&channels, now_unix_secs(), current_epoch());
     if snapshot.entries.is_empty() {
         println!("Volume memory {}: nothing to store (no sources)", instance.instance_id);
         let _ = instance.show_alert().await;
@@ -837,8 +935,8 @@ impl Action for VolumeMemoryAction {
     type Settings = VolumeMemorySettings;
 
     async fn will_appear(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        remember_settings(instance, settings).await;
-        render(instance, settings).await;
+        let settings = adopt_settings(instance, settings).await;
+        render(instance, &settings).await;
         // A new key can shift the "Preset N" numbering of the others.
         refresh_memory_buttons().await;
         Ok(())
@@ -853,12 +951,12 @@ impl Action for VolumeMemoryAction {
 
     /// Label edits (and "clear") arrive from the property inspector here.
     async fn did_receive_settings(&self, instance: &Instance, settings: &Self::Settings) -> OpenActionResult<()> {
-        remember_settings(instance, settings).await;
+        let settings = adopt_settings(instance, settings).await;
         if settings.snapshot.is_none() {
             // A cleared preset can't be the loaded one.
             unload(&mut *LOADED_PRESET.lock().await, &instance.instance_id);
         }
-        render(instance, settings).await;
+        render(instance, &settings).await;
         Ok(())
     }
 
@@ -963,7 +1061,7 @@ mod tests {
     }
 
     fn snap(entries: Vec<MemoryEntry>) -> MemorySnapshot {
-        MemorySnapshot { saved_at: 0, entries }
+        MemorySnapshot { saved_at: 0, epoch: 0, entries }
     }
 
     #[test]
@@ -973,8 +1071,9 @@ mod tests {
         let mut b = ch("Firefox", "Nmplol - Twitch", Some("ttv:nmplol"), 2);
         b.mute = true;
         b.vol_percent = 75.0;
-        let s = snapshot_channels([&a, &b], 123);
+        let s = snapshot_channels([&a, &b], 123, 7);
         assert_eq!(s.saved_at, 123);
+        assert_eq!(s.epoch, 7);
         assert_eq!(
             s.entries,
             vec![
@@ -1080,7 +1179,7 @@ mod tests {
             ch_at("Spotify", "Song A", None, 1, 40.0, false),
             ch_at("Firefox", "Nmplol - Twitch", Some("ttv:nmplol"), 2, 75.0, true),
         ];
-        let s = snapshot_channels(&live, 0);
+        let s = snapshot_channels(&live, 0, 0);
         assert_eq!(find_drift(&s, &live), None);
     }
 
@@ -1160,6 +1259,23 @@ mod tests {
             serde_json::from_str(r#"{"label":"Game","snapshot":{"entries":[{"app_id":"Spotify"}]}}"#)
                 .unwrap();
         assert_eq!(s.label, "Game");
-        assert_eq!(s.snapshot.unwrap().entries[0].app_id, "Spotify");
+        let snapshot = s.snapshot.unwrap();
+        assert_eq!(snapshot.entries[0].app_id, "Spotify");
+        // Written before epochs existed: stale against any live epoch.
+        assert_eq!(snapshot.epoch, 0);
+        assert!(is_stale(&snapshot, current_epoch()));
+    }
+
+    #[test]
+    fn snapshots_outlive_only_their_own_epoch() {
+        let before = current_epoch();
+        assert!(before > 0, "epoch is seeded from the clock at startup");
+        let s = snapshot_channels(&[], 0, before);
+        assert!(!is_stale(&s, before));
+
+        let after = advance_epoch();
+        assert!(after > before, "a new epoch is always strictly later");
+        assert!(is_stale(&s, after));
+        assert!(!is_stale(&snapshot_channels(&[], 0, after), current_epoch()));
     }
 }
